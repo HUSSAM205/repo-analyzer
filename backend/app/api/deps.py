@@ -1,4 +1,5 @@
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -6,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_access_token
-from app.db.models import User
+from app.db.models import Repo, User
 from app.db.session import get_db
 
 _bearer_scheme = HTTPBearer()
@@ -27,3 +28,10 @@ async def get_current_user(
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return user
+
+
+async def get_owned_repo(db: AsyncSession, repo_id: UUID, user: User) -> Repo:
+    repo = await db.get(Repo, repo_id)
+    if repo is None or repo.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found")
+    return repo

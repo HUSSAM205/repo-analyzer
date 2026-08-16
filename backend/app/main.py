@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import auth, jobs, repos, search
+from app.api.routes import auth, files, jobs, repos, search
 from app.config import get_settings
 from app.core.embeddings import _model, _tokenizer
 
@@ -26,6 +26,7 @@ app.include_router(auth.router)
 app.include_router(repos.router)
 app.include_router(jobs.router)
 app.include_router(search.router)
+app.include_router(files.router)
 
 
 @app.get("/health")
