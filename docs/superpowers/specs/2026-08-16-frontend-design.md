@@ -1,7 +1,7 @@
 # Repo Analyzer — Sub-Project 2B: Next.js Frontend & Full-Stack Packaging
 
-Status: Approved (implementation begins after sub-project 2A is merged)
-Date: 2026-08-16
+Status: Approved (sub-project 2A merged; implementation begins now)
+Date: 2026-08-16 (visual design / animation detail added 2026-08-16)
 
 ## Purpose
 
@@ -29,9 +29,28 @@ conversations, streaming chat).
 ## Architecture
 
 **Stack:** Next.js 14 (App Router), TypeScript, Tailwind CSS,
-shadcn/ui components, dark mode by default (no light-mode toggle in
-this phase — one deliberate, well-executed theme beats a half-tested
-second one).
+shadcn/ui components, Framer Motion for animation, dark mode by
+default (no light-mode toggle in this phase — one deliberate,
+well-executed theme beats a half-tested second one).
+
+**Visual design:** Dark theme with 1px low-opacity borders throughout
+for structure. Glassmorphism (backdrop-blur + translucent surface) is
+reserved for elevated/floating elements only — the chat input bar,
+dropdowns, modals — not applied to the whole UI, so it reads as a
+deliberate accent rather than a gimmick. Typography: a clean geometric
+sans for UI chrome (Geist or Inter), a proper monospace for the code
+viewer and chat code blocks (JetBrains Mono). Framer Motion drives:
+page/panel transitions, file-tree expand/collapse, panel
+resize/collapse, skeleton loaders during data fetches, and pulsing
+indicators (streaming cursor, "searching code..." state) — all kept
+subtle (150-250ms, standard easing) rather than showy, consistent with
+"developer tool," not "marketing site."
+
+**Responsive:** panes resize and collapse gracefully across
+desktop/laptop widths (a 1280px laptop through a 1920px+ external
+monitor), with a collapsible-sidebar mode for narrower windows within
+that range. Still desktop/laptop-only — no dedicated phone/mobile
+layout (see Non-goals).
 
 **Pages:**
 - `/login`, `/register` — thin forms against the existing
@@ -64,7 +83,12 @@ second one).
   Renders assistant messages as markdown with syntax-highlighted code
   blocks (react-markdown + the same Shiki highlighter as the code
   viewer, for visual consistency), streaming tokens appended live as
-  they arrive rather than waiting for the full message.
+  they arrive rather than waiting for the full message. Every rendered
+  code block has a copy-to-clipboard button. The message list
+  auto-scrolls to bottom as tokens stream in, except when the user has
+  manually scrolled up to read earlier messages — in that case a
+  "jump to bottom" affordance appears instead of fighting their scroll
+  position.
 
 **Backend additions needed for this sub-project** (small, added here
 since they're pure frontend-support endpoints with no new domain
