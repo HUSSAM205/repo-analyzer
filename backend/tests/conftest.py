@@ -38,7 +38,10 @@ async def _dispose_engine_after_test():
 async def _reset_redis_client():
     # Like the database, the Redis client singleton is bound to an event
     # loop. Between tests, we must reset it so a fresh client is created
-    # for the next test's loop.
+    # for the next test's loop. We must also close the existing client to
+    # avoid leaking connection pool resources.
     yield
     import app.core.rate_limit
+    if app.core.rate_limit._redis_client is not None:
+        await app.core.rate_limit._redis_client.aclose()
     app.core.rate_limit._redis_client = None
