@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TypedDict
 
@@ -6,6 +7,8 @@ from langgraph.types import StreamWriter
 
 from app.core.agent_tools import SEARCH_CODE_TOOL_SPEC
 from app.core.llm import LLMClient, LLMEvent, Message, ToolCall
+
+logger = logging.getLogger(__name__)
 
 # NOTE on the LangGraph streaming API used here: the brief anticipated
 # `from langgraph.config import get_stream_writer()`, a contextvar-based
@@ -58,12 +61,15 @@ def _build_graph(llm_client: LLMClient, search_fn: SearchFn):
         tool_calls: list[ToolCall] = []
         final_message: Message | None = None
         errored = False
+        accumulated_text = ""
 
         async for event in llm_client.stream_chat(
             state["messages"], tools=[SEARCH_CODE_TOOL_SPEC], system_prompt=SYSTEM_PROMPT
         ):
             writer(event)
-            if event.type == "tool_call":
+            if event.type == "token":
+                accumulated_text += event.token or ""
+            elif event.type == "tool_call":
                 tool_calls = event.tool_calls or []
             elif event.type == "message_done":
                 final_message = event.message
@@ -73,8 +79,17 @@ def _build_graph(llm_client: LLMClient, search_fn: SearchFn):
         if errored:
             return {"done": True}
         if tool_calls:
+            # A turn can carry preamble text (e.g. "Let me search for that...")
+            # before the tool call. Preserve it as the message content instead
+            # of hardcoding "" -- otherwise it's streamed to the user via token
+            # events but never recorded in history, and both provider message
+            # converters skip empty-content assistant messages entirely, so the
+            # model loses all memory of what it just said on the next turn.
             return {
-                "messages": [*state["messages"], Message(role="assistant", content="", tool_calls=tool_calls)],
+                "messages": [
+                    *state["messages"],
+                    Message(role="assistant", content=accumulated_text, tool_calls=tool_calls),
+                ],
                 "iterations": state["iterations"] + 1,
             }
         if final_message is not None:
@@ -88,8 +103,9 @@ def _build_graph(llm_client: LLMClient, search_fn: SearchFn):
             if tool_call.name == "search_code":
                 try:
                     result_text = await search_fn(tool_call.arguments.get("query", ""))
-                except Exception as exc:
-                    result_text = f"search_code failed: {exc}"
+                except Exception:
+                    logger.exception("search_code tool call failed for query=%r", tool_call.arguments.get("query"))
+                    result_text = "search_code failed -- unable to search the repository right now."
             else:
                 result_text = f"Unknown tool: {tool_call.name}"
             writer(LLMEvent(type="tool_result", tool_calls=[tool_call], tool_result_text=result_text))

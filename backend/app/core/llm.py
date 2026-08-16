@@ -61,11 +61,15 @@ class FakeLLMClient:
             raise RuntimeError("FakeLLMClient ran out of scripted turns")
         turn = self._turns.pop(0)
 
+        text = turn.text or ""
+        for word in text.split(" ") if text else []:
+            yield LLMEvent(type="token", token=word + " ")
+
         if turn.tool_calls:
+            # A turn can carry preamble text (e.g. "Let me search for that...")
+            # followed by a tool call, mirroring real providers. The tokens
+            # above were already streamed; no message_done for a tool-call turn.
             yield LLMEvent(type="tool_call", tool_calls=turn.tool_calls)
             return
 
-        text = turn.text or ""
-        for word in text.split(" "):
-            yield LLMEvent(type="token", token=word + " ")
         yield LLMEvent(type="message_done", message=Message(role="assistant", content=text))
