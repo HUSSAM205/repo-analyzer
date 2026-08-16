@@ -12,3 +12,27 @@ export interface TokenResponse {
 export interface ApiError {
   detail: string;
 }
+
+export interface Repo {
+  id: string;
+  url: string;
+  name: string;
+  status: "pending" | "ready" | "failed";
+  created_at: string;
+}
+
+export interface Job {
+  id: string;
+  repo_id: string;
+  status: "pending" | "running" | "completed" | "failed";
+  progress: number;
+  error_message: string | null;
+  skipped_files: number;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface AnalyzeRepoResponse {
+  repo_id: string;
+  job_id: string;
+}
