@@ -29,5 +29,42 @@ services:
       timeout: 5s
       retries: 10
 
+  api:
+    build:
+      context: ./backend
+    container_name: repo-analyzer-api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://repoanalyzer:repoanalyzer@postgres:5432/repoanalyzer
+      REDIS_URL: redis://redis:6379/0
+      JWT_PRIVATE_KEY_PATH: keys/jwt_private.pem
+      JWT_PUBLIC_KEY_PATH: keys/jwt_public.pem
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/keys:/app/keys
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+    container_name: repo-analyzer-worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://repoanalyzer:repoanalyzer@postgres:5432/repoanalyzer
+      REDIS_URL: redis://redis:6379/0
+      JWT_PRIVATE_KEY_PATH: keys/jwt_private.pem
+      JWT_PUBLIC_KEY_PATH: keys/jwt_public.pem
+    volumes:
+      - ./backend/keys:/app/keys
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["arq", "app.workers.settings.WorkerSettings"]
+
 volumes:
   postgres_data:
