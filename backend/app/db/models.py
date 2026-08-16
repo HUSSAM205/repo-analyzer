@@ -48,6 +48,7 @@ class User(Base):
 
     api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     repos: Mapped[list["Repo"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    conversations: Mapped[list["Conversation"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class ApiKey(Base):
@@ -80,6 +81,8 @@ class Repo(Base):
     user: Mapped["User"] = relationship(back_populates="repos")
     jobs: Mapped[list["Job"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
     chunks: Mapped[list["CodeChunk"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
+    files: Mapped[list["File"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
+    conversations: Mapped[list["Conversation"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
 
     __table_args__ = (UniqueConstraint("user_id", "url", name="uq_repo_user_url"),)
 
@@ -127,3 +130,62 @@ class CodeChunk(Base):
         Index("ix_code_chunks_repo_id", "repo_id"),
         Index("ix_code_chunks_content_tsv", "content_tsv", postgresql_using="gin"),
     )
+
+
+class File(Base):
+    __tablename__ = "files"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"), nullable=False)
+    path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    repo: Mapped["Repo"] = relationship(back_populates="files")
+
+    __table_args__ = (
+        UniqueConstraint("repo_id", "path", name="uq_files_repo_id_path"),
+        Index("ix_files_repo_id", "repo_id"),
+    )
+
+
+class MessageRole(str, enum.Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    repo: Mapped["Repo"] = relationship(back_populates="conversations")
+    user: Mapped["User"] = relationship(back_populates="conversations")
+    messages: Mapped[list["Message"]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan", order_by="Message.created_at"
+    )
+
+    __table_args__ = (
+        Index("ix_conversations_repo_id", "repo_id"),
+        Index("ix_conversations_user_id", "user_id"),
+    )
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
+    role: Mapped[MessageRole] = mapped_column(
+        Enum(MessageRole, name="message_role", values_callable=lambda e: [m.value for m in e]), nullable=False
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    conversation: Mapped["Conversation"] = relationship(back_populates="messages")
+
+    __table_args__ = (Index("ix_messages_conversation_id", "conversation_id"),)
