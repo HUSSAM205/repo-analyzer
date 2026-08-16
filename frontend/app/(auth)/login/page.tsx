@@ -27,7 +27,7 @@ export default function LoginPage() {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({ detail: "Login failed" }));
-        setError(body.detail ?? "Login failed");
+        setError(typeof body.detail === "string" ? body.detail : "Login failed. Please check your email and password.");
         setLoading(false);
         return;
       }

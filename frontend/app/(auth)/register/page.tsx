@@ -27,7 +27,9 @@ export default function RegisterPage() {
       });
       if (!registerRes.ok) {
         const body = await registerRes.json().catch(() => ({ detail: "Registration failed" }));
-        setError(body.detail ?? "Registration failed");
+        setError(
+          typeof body.detail === "string" ? body.detail : "Registration failed. Please check your email and password."
+        );
         setLoading(false);
         return;
       }
