@@ -24,3 +24,13 @@ class JobResponse(BaseModel):
     skipped_files: int
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class RepoResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    url: str
+    name: str
+    status: str
+    created_at: datetime

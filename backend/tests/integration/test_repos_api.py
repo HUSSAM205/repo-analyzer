@@ -84,3 +84,25 @@ async def test_get_job_rejects_other_users_job():
             f"/api/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {other_token}"}
         )
         assert other_resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_repos_returns_only_the_requesting_users_repos():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        owner_token = await _register_and_login(client)
+        owner_headers = {"Authorization": f"Bearer {owner_token}"}
+        await client.post(
+            "/api/v1/repos/analyze", json={"repo_url": "https://github.com/octocat/Hello-World"}, headers=owner_headers
+        )
+
+        other_token = await _register_and_login(client)
+        other_headers = {"Authorization": f"Bearer {other_token}"}
+
+        owner_list_resp = await client.get("/api/v1/repos", headers=owner_headers)
+        assert owner_list_resp.status_code == 200
+        assert len(owner_list_resp.json()) == 1
+        assert owner_list_resp.json()[0]["url"] == "https://github.com/octocat/Hello-World"
+
+        other_list_resp = await client.get("/api/v1/repos", headers=other_headers)
+        assert other_list_resp.status_code == 200
+        assert other_list_resp.json() == []

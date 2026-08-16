@@ -5,10 +5,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.arq_pool import get_arq_pool
+from app.api.deps import get_current_user
 from app.core.rate_limit import enforce_analyze_rate_limit
 from app.db.models import Job, Repo, RepoStatus, User
 from app.db.session import get_db
-from app.schemas.repos import RepoAnalyzeRequest, RepoAnalyzeResponse
+from app.schemas.repos import RepoAnalyzeRequest, RepoAnalyzeResponse, RepoResponse
 
 router = APIRouter(prefix="/api/v1/repos", tags=["repos"])
 
@@ -41,3 +42,14 @@ async def analyze_repo_endpoint(
     await pool.enqueue_job("analyze_repo", str(job.id))
 
     return RepoAnalyzeResponse(repo_id=repo.id, job_id=job.id)
+
+
+@router.get("", response_model=list[RepoResponse])
+async def list_repos(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[Repo]:
+    result = await db.execute(
+        select(Repo).where(Repo.user_id == current_user.id).order_by(Repo.created_at.desc())
+    )
+    return list(result.scalars().all())
