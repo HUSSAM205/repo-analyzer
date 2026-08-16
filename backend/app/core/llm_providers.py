@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import AsyncIterator
 
 from anthropic import AsyncAnthropic
@@ -8,6 +9,14 @@ from app.config import get_settings
 from app.core.llm import LLMEvent, Message, ToolCall, ToolSpec
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+# Generic, non-leaking message surfaced to SSE clients when a provider call
+# fails. The real exception (which can contain auth details, request/response
+# bodies, or other sensitive internals) is logged server-side via
+# logger.exception() instead -- see AnthropicClient.stream_chat and
+# OpenAIClient.stream_chat below.
+_PROVIDER_ERROR_MESSAGE = "The AI provider is currently unavailable. Please try again."
 
 
 def _to_anthropic_messages(messages: list[Message]) -> list[dict]:
@@ -70,8 +79,9 @@ class AnthropicClient:
                 else:
                     text = "".join(block.text for block in final_message.content if block.type == "text")
                     yield LLMEvent(type="message_done", message=Message(role="assistant", content=text))
-        except Exception as exc:
-            yield LLMEvent(type="error", error=str(exc))
+        except Exception:
+            logger.exception("AnthropicClient.stream_chat failed (model=%s)", self._model)
+            yield LLMEvent(type="error", error=_PROVIDER_ERROR_MESSAGE)
 
 
 def _to_openai_messages(messages: list[Message]) -> list[dict]:
@@ -147,8 +157,9 @@ class OpenAIClient:
                 yield LLMEvent(type="tool_call", tool_calls=tool_calls)
             else:
                 yield LLMEvent(type="message_done", message=Message(role="assistant", content="".join(content_parts)))
-        except Exception as exc:
-            yield LLMEvent(type="error", error=str(exc))
+        except Exception:
+            logger.exception("OpenAIClient.stream_chat failed (model=%s)", self._model)
+            yield LLMEvent(type="error", error=_PROVIDER_ERROR_MESSAGE)
 
 
 def get_llm_client():

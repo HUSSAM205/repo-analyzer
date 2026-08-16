@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
+# Cap how much prior conversation gets fed back into the agent on each turn.
+# Without a bound, a long-running conversation eventually exceeds the model's
+# context window on every subsequent send -- and since the user's message is
+# committed before the stream starts, each failed retry adds another message
+# and makes the conversation permanently unusable. 40 messages is roughly 20
+# user/assistant exchanges, a reasonable working-memory window.
+MAX_HISTORY_MESSAGES = 40
+
 
 def _db_role_to_agent_role(role: MessageRole) -> str:
     return "user" if role == MessageRole.USER else "assistant"
@@ -29,9 +37,13 @@ def _db_role_to_agent_role(role: MessageRole) -> str:
 
 async def _load_history(db: AsyncSession, conversation_id: UUID) -> list[AgentMessage]:
     result = await db.execute(
-        select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at)
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.desc())
+        .limit(MAX_HISTORY_MESSAGES)
     )
-    return [AgentMessage(role=_db_role_to_agent_role(m.role), content=m.content) for m in result.scalars().all()]
+    recent_messages = list(reversed(result.scalars().all()))
+    return [AgentMessage(role=_db_role_to_agent_role(m.role), content=m.content) for m in recent_messages]
 
 
 def _sse_event(event_type: str, data: dict) -> str:
@@ -102,7 +114,21 @@ async def send_message(
                     summary = (event.tool_result_text or "")[:200]
                     yield _sse_event("tool_result", {"summary": summary})
                 elif event.type == "message_done":
-                    final_text = event.message.content if event.message else assistant_text
+                    # `assistant_text` accumulates every "token" event across
+                    # the WHOLE interaction (every turn, including preamble
+                    # text streamed before a tool call on earlier turns) --
+                    # not just the final turn. Using event.message.content
+                    # here would silently drop that preamble from what gets
+                    # persisted, even though the client already saw it stream
+                    # by, because it only reflects the LAST turn's content.
+                    # A turn's final text is itself streamed as "token"
+                    # events before message_done fires (see agent.py's
+                    # assistant_node), so assistant_text is already complete
+                    # -- event.message is only a signal that the turn is
+                    # done, not an independent source of text. strip() drops
+                    # only the harmless trailing space FakeLLMClient's
+                    # word-by-word tokenizer appends after the last token.
+                    final_text = assistant_text.strip()
                     async with async_session_maker() as save_db:
                         assistant_message = Message(
                             conversation_id=conversation_id_value, role=MessageRole.ASSISTANT, content=final_text
