@@ -45,3 +45,17 @@ async def _reset_redis_client():
     if app.core.rate_limit._redis_client is not None:
         await app.core.rate_limit._redis_client.aclose()
     app.core.rate_limit._redis_client = None
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_arq_pool():
+    # Same event-loop-binding issue as the redis rate-limit client above:
+    # the ArqRedis pool is a module-level singleton wrapping a redis
+    # connection pool tied to the event loop that created it. Reset it
+    # after every test so the next test's loop creates a fresh pool
+    # instead of reusing one bound to an already-closed loop.
+    yield
+    import app.core.arq_pool
+    if app.core.arq_pool._pool is not None:
+        await app.core.arq_pool._pool.aclose()
+    app.core.arq_pool._pool = None
