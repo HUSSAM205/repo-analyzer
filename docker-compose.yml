@@ -57,8 +57,6 @@ services:
       REDIS_URL: redis://redis:6379/0
       JWT_PRIVATE_KEY_PATH: keys/jwt_private.pem
       JWT_PUBLIC_KEY_PATH: keys/jwt_public.pem
-    volumes:
-      - ./backend/keys:/app/keys
     depends_on:
       postgres:
         condition: service_healthy

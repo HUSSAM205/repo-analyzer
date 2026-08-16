@@ -2,6 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_current_user
 from app.core.embeddings import embed_text
@@ -23,7 +24,7 @@ async def search_repo(
     if repo is None or repo.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found")
 
-    query_embedding = embed_text(payload.query)
+    query_embedding = await run_in_threadpool(embed_text, payload.query)
     results = await hybrid_search(
         db, payload.repo_id, query_text=payload.query, query_embedding=query_embedding, limit=payload.limit
     )

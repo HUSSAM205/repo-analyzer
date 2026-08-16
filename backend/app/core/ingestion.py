@@ -55,6 +55,7 @@ def walk_and_chunk(root_dir: Path, max_files: int) -> tuple[list[Chunk], int, in
     all_chunks: list[Chunk] = []
     files_processed = 0
     files_skipped = 0
+    resolved_root = root_dir.resolve()
 
     for path in sorted(root_dir.rglob("*")):
         if path.is_dir():
@@ -63,7 +64,32 @@ def walk_and_chunk(root_dir: Path, max_files: int) -> tuple[list[Chunk], int, in
             continue
         if files_processed + files_skipped >= max_files:
             break
-        if path.stat().st_size > MAX_FILE_SIZE_BYTES:
+
+        # Symlinked files must never be followed: `is_dir()` is False for a
+        # symlink pointing at a file, so it would otherwise sail through the
+        # checks below and `read_text()` would happily follow it and read
+        # whatever it points at (e.g. a secret mounted outside the clone).
+        if path.is_symlink():
+            files_skipped += 1
+            continue
+
+        # Defense in depth: even without a direct symlink, a resolved path
+        # (e.g. via a symlinked parent directory, or other filesystem
+        # trickery) could still land outside the clone root. Refuse to read
+        # anything that doesn't resolve back under root_dir.
+        try:
+            if not path.resolve().is_relative_to(resolved_root):
+                files_skipped += 1
+                continue
+        except OSError:
+            files_skipped += 1
+            continue
+
+        try:
+            if path.stat().st_size > MAX_FILE_SIZE_BYTES:
+                files_skipped += 1
+                continue
+        except OSError:
             files_skipped += 1
             continue
 

@@ -75,6 +75,62 @@ async def test_analyze_repo_task_completes_and_stores_chunks(local_git_repo_url)
 
 
 @pytest.mark.asyncio
+async def test_analyze_repo_task_reanalysis_does_not_duplicate_chunks(local_git_repo_url):
+    # Mirrors what POST /repos/analyze does for a repeat analysis: reuse the
+    # same Repo row, create a fresh Job against it. The chunk count after the
+    # second analyze_repo run must equal the count after the first, not
+    # double it.
+    async with async_session_maker() as db:
+        user = User(email=f"worker-{uuid.uuid4()}@example.com", hashed_password="hashed")
+        db.add(user)
+        await db.flush()
+
+        repo = Repo(user_id=user.id, url=local_git_repo_url, name="local-repo", status=RepoStatus.PENDING)
+        db.add(repo)
+        await db.flush()
+
+        first_job = Job(repo_id=repo.id, status=JobStatus.PENDING)
+        db.add(first_job)
+        await db.commit()
+        first_job_id = str(first_job.id)
+        repo_id = repo.id
+        user_id = user.id
+
+    await analyze_repo({}, first_job_id)
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(CodeChunk).where(CodeChunk.repo_id == repo_id))
+        count_after_first = len(result.scalars().all())
+        assert count_after_first > 0
+
+        second_job = Job(repo_id=repo_id, status=JobStatus.PENDING)
+        db.add(second_job)
+        await db.commit()
+        second_job_id = str(second_job.id)
+
+    await analyze_repo({}, second_job_id)
+
+    async with async_session_maker() as db:
+        refreshed_second_job = await db.get(Job, uuid.UUID(second_job_id))
+        assert refreshed_second_job.status == JobStatus.COMPLETED
+
+        result = await db.execute(select(CodeChunk).where(CodeChunk.repo_id == repo_id))
+        chunks_after_second = result.scalars().all()
+        assert len(chunks_after_second) == count_after_first
+
+        for chunk in chunks_after_second:
+            await db.delete(chunk)
+        first_job_row = await db.get(Job, uuid.UUID(first_job_id))
+        await db.delete(first_job_row)
+        await db.delete(refreshed_second_job)
+        refreshed_repo = await db.get(Repo, repo_id)
+        await db.delete(refreshed_repo)
+        refreshed_user = await db.get(User, user_id)
+        await db.delete(refreshed_user)
+        await db.commit()
+
+
+@pytest.mark.asyncio
 async def test_analyze_repo_task_marks_failed_on_bad_url():
     async with async_session_maker() as db:
         user = User(email=f"worker-{uuid.uuid4()}@example.com", hashed_password="hashed")
