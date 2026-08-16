@@ -50,6 +50,42 @@ curl -X POST http://localhost:8000/api/v1/search \
   -d '{"repo_id": "<repo_id>", "query": "readme"}'
 ```
 
+## Chat with a repo (sub-project 2A)
+
+Once a repo has finished analyzing, you can open a conversation and ask
+questions about it. This requires a real LLM API key (Anthropic or
+OpenAI) — without one, the chat endpoint returns a clean SSE `error`
+event rather than crashing, but won't produce real answers.
+
+1. Add to `backend/.env`:
+   ```
+   LLM_PROVIDER=anthropic
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+   (or `LLM_PROVIDER=openai` with `OPENAI_API_KEY=...`)
+2. Restart the API (and worker, if running) so the new env vars are picked up.
+3. Browse the file tree: `curl http://localhost:8000/api/v1/repos/<repo_id>/files -H "Authorization: Bearer <token>"`
+4. Start a conversation:
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/repos/<repo_id>/conversations \
+     -H "Content-Type: application/json" -H "Authorization: Bearer <token>" \
+     -d '{"title": "First chat"}'
+   # -> {"id": "<conversation_id>", ...}
+   ```
+5. Send a message and watch the streamed response (SSE — `curl -N` to disable buffering):
+   ```bash
+   curl -N -X POST http://localhost:8000/api/v1/conversations/<conversation_id>/messages \
+     -H "Content-Type: application/json" -H "Authorization: Bearer <token>" \
+     -d '{"content": "What does this repo do?"}'
+   ```
+   You should see `event: tool_call`, `event: tool_result`, a stream of
+   `event: token`, and a final `event: done` — with the assistant citing
+   real files and line numbers from the repo.
+
+This manual walkthrough is the only place this sub-project talks to a
+real LLM API — all automated tests use a deterministic fake client (see
+`docs/superpowers/specs/2026-08-16-agent-engine-design.md`).
+
 ## Non-goals in this phase
 
 No frontend, no LangGraph multi-agent workflow, no org/RBAC beyond
