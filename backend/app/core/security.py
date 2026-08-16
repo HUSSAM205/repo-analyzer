@@ -45,7 +45,7 @@ def decode_access_token(token: str) -> dict:
 
 
 def generate_api_key() -> tuple[str, str]:
-    plaintext = f"ra_{secrets.token_urlsafe(20)}"
+    plaintext = f"ra_{secrets.token_urlsafe(32)}"
     return plaintext, hash_api_key(plaintext)
 
 
