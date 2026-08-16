@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     rate_limit_analyze_per_minute: int = 5
     rate_limit_bucket_capacity: int = 5
 
+    llm_provider: str = "anthropic"
+    anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-sonnet-4-5-20250929"
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4o"
+
 
 @lru_cache
 def get_settings() -> Settings:
