@@ -32,3 +32,13 @@ async def _dispose_engine_after_test():
     # opened on the next checkout instead.
     yield
     await engine.dispose()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_redis_client():
+    # Like the database, the Redis client singleton is bound to an event
+    # loop. Between tests, we must reset it so a fresh client is created
+    # for the next test's loop.
+    yield
+    import app.core.rate_limit
+    app.core.rate_limit._redis_client = None
