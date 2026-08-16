@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Annotated
 from uuid import UUID
@@ -16,6 +17,8 @@ from app.core.llm_providers import get_llm_client
 from app.db.models import Message, MessageRole, User
 from app.db.session import async_session_maker, get_db
 from app.schemas.chat import SendMessageRequest
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
@@ -55,8 +58,11 @@ async def send_message(
     async def event_stream() -> AsyncIterator[str]:
         try:
             llm_client = get_llm_client()
-        except RuntimeError as exc:
-            yield _sse_event("error", {"message": str(exc)})
+        except Exception:
+            logger.exception("get_llm_client() failed for conversation_id=%s", conversation_id_value)
+            yield _sse_event(
+                "error", {"message": "The chat assistant is not configured. Please contact the administrator."}
+            )
             return
 
         conversation_messages = [*history, AgentMessage(role="user", content=payload.content)]
@@ -66,8 +72,26 @@ async def send_message(
                 return await search_code(search_db, repo_id, query)
 
         assistant_text = ""
+        # Once message_done has been handled, ignore any further events
+        # instead of returning early. This makes "persist and forward the
+        # assistant message exactly once" structural -- it no longer relies
+        # on run_agent() never emitting anything after message_done -- while
+        # still letting run_agent()'s underlying LangGraph astream() drain to
+        # its own natural StopAsyncIteration. Returning early instead (i.e.
+        # abandoning that async generator before it finishes on its own) was
+        # tried and reintroduces a real side effect: LangGraph 0.2.45's
+        # PregelRunner spawns a background asyncio Task for stream_mode
+        # "custom" delivery that is only cleaned up as part of the
+        # generator's normal exit path, not on forced closure/GeneratorExit
+        # -- forcing early closure leaks that task until garbage collection,
+        # which then throws "Task was destroyed but it is pending!" (and, if
+        # GC happens after the loop has closed, "Event loop is closed") at
+        # process/loop teardown. Draining fully avoids that entirely.
+        done_emitted = False
         try:
             async for event in run_agent(llm_client, search_fn, conversation_messages):
+                if done_emitted:
+                    continue
                 if event.type == "token":
                     assistant_text += event.token or ""
                     yield _sse_event("token", {"text": event.token})
@@ -87,9 +111,13 @@ async def send_message(
                         await save_db.commit()
                         await save_db.refresh(assistant_message)
                     yield _sse_event("done", {"message_id": str(assistant_message.id)})
+                    done_emitted = True
                 elif event.type == "error":
                     yield _sse_event("error", {"message": event.error or "The assistant hit an unexpected error."})
-        except Exception as exc:
-            yield _sse_event("error", {"message": f"Unexpected error: {exc}"})
+        except Exception:
+            logger.exception("chat stream failed for conversation_id=%s", conversation_id_value)
+            yield _sse_event(
+                "error", {"message": "An unexpected error occurred while generating the response."}
+            )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
