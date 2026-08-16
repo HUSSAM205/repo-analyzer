@@ -43,6 +43,16 @@ async def _load_history(db: AsyncSession, conversation_id: UUID) -> list[AgentMe
         .limit(MAX_HISTORY_MESSAGES)
     )
     recent_messages = list(reversed(result.scalars().all()))
+    # A failed turn commits only the user message (the error path never
+    # persists an assistant reply), which can permanently shift the
+    # user/assistant alternation parity for a conversation. If that has
+    # happened, a bounded window computed purely by count can start with an
+    # assistant message -- and Anthropic's Messages API requires the first
+    # message in the array to have role "user", rejecting the request
+    # otherwise. Drop any leading non-user messages so the window always
+    # starts on a user message.
+    while recent_messages and recent_messages[0].role != MessageRole.USER:
+        recent_messages.pop(0)
     return [AgentMessage(role=_db_role_to_agent_role(m.role), content=m.content) for m in recent_messages]
 
 
@@ -128,7 +138,14 @@ async def send_message(
                     # done, not an independent source of text. strip() drops
                     # only the harmless trailing space FakeLLMClient's
                     # word-by-word tokenizer appends after the last token.
-                    final_text = assistant_text.strip()
+                    #
+                    # One case still needs event.message.content as a
+                    # fallback: the agent's max-tool-iterations give-up
+                    # message (see app/core/agent.py) is emitted directly via
+                    # a message_done event with no preceding token events at
+                    # all, so assistant_text is empty in that case even
+                    # though there is real explanatory text to persist.
+                    final_text = assistant_text.strip() or (event.message.content if event.message else "")
                     async with async_session_maker() as save_db:
                         assistant_message = Message(
                             conversation_id=conversation_id_value, role=MessageRole.ASSISTANT, content=final_text

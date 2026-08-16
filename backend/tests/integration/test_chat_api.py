@@ -249,6 +249,139 @@ async def test_send_message_truncates_history_to_max_history_messages(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_send_message_history_window_never_starts_with_assistant_message(monkeypatch):
+    # Regression test: a failed turn commits only the user message (the
+    # error path never persists an assistant reply), which can permanently
+    # shift the user/assistant alternation parity for a conversation. Once
+    # that has happened, a naive count-based window can start with an
+    # assistant message -- and Anthropic's Messages API rejects a request
+    # whose first message isn't role "user". Build a message history where a
+    # window of exactly MAX_HISTORY_MESSAGES rows would start on an
+    # assistant message, and assert the leading assistant message(s) get
+    # dropped so the window handed to the agent always starts with "user".
+    from app.api.routes import chat as chat_module
+    from app.core.llm import LLMEvent
+    from app.core.llm import Message as AgentMessage
+
+    captured_calls: list[list[AgentMessage]] = []
+
+    async def fake_run_agent(llm_client, search_fn, messages):
+        captured_calls.append(messages)
+        yield LLMEvent(type="message_done", message=AgentMessage(role="assistant", content="ok"))
+
+    monkeypatch.setattr(chat_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(chat_module, "get_llm_client", lambda: object())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token, user_id = await _register_and_login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        repo_id = await _create_repo(user_id)
+
+        conv_resp = await client.post(f"/api/v1/repos/{repo_id}/conversations", json={"title": "Chat"}, headers=headers)
+        conversation_id = conv_resp.json()["id"]
+
+        # Every successful turn contributes exactly two messages (U then A),
+        # so a conversation's prior-message count is even *unless* its most
+        # recent turn failed and left a dangling, unanswered user message --
+        # which is exactly the scenario in the bug report (a failed turn
+        # permanently shifting the user/assistant alternation parity for
+        # everything that follows it). Using an odd prior-message count with
+        # otherwise perfect alternation (U at even index, A at odd index)
+        # reproduces the same numerical effect: MAX_HISTORY_MESSAGES is even
+        # (40), so picking an odd total makes the tail window's start index
+        # (total - MAX_HISTORY_MESSAGES) odd too, i.e. an ASSISTANT message,
+        # exactly the case a naive count-based window mishandles.
+        total_prior_messages = chat_module.MAX_HISTORY_MESSAGES + 11  # odd total
+        base_time = datetime.now(timezone.utc) - timedelta(minutes=total_prior_messages)
+        async with async_session_maker() as db:
+            for i in range(total_prior_messages):
+                role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
+                db.add(
+                    DbMessage(
+                        conversation_id=uuid.UUID(conversation_id),
+                        role=role,
+                        content=f"history-message-{i}",
+                        created_at=base_time + timedelta(minutes=i),
+                    )
+                )
+            await db.commit()
+
+        # Sanity check on the test's own setup: confirm a naive window of
+        # the most recent MAX_HISTORY_MESSAGES rows really would start with
+        # an assistant message, so this test is actually exercising the fix
+        # rather than trivially passing.
+        naive_window_start_index = total_prior_messages - chat_module.MAX_HISTORY_MESSAGES
+        assert naive_window_start_index % 2 == 1  # odd index => ASSISTANT per the loop above
+
+        async with client.stream(
+            "POST",
+            f"/api/v1/conversations/{conversation_id}/messages",
+            json={"content": "newest question"},
+            headers=headers,
+        ) as response:
+            assert response.status_code == 200
+            async for _ in response.aiter_text():
+                pass
+
+        assert len(captured_calls) == 1
+        sent_messages = captured_calls[0]
+        assert len(sent_messages) > 0
+        assert sent_messages[0].role == "user"
+
+
+@pytest.mark.asyncio
+async def test_send_message_persists_give_up_message_with_no_preceding_tokens(monkeypatch):
+    # Regression test: the agent's max-tool-iterations give-up message (see
+    # app/core/agent.py) is emitted directly via a message_done event with
+    # no preceding token events at all. final_text must fall back to
+    # event.message.content in that case instead of persisting empty
+    # content.
+    from app.api.routes import chat as chat_module
+    from app.core.llm import LLMEvent
+    from app.core.llm import Message as AgentMessage
+
+    give_up_text = (
+        "I wasn't able to finish researching this within the allowed number of search steps."
+    )
+
+    async def fake_run_agent(llm_client, search_fn, messages):
+        # No "token" events at all -- mirrors agent.py's give-up path, which
+        # writes message_done directly without streaming any tokens first.
+        yield LLMEvent(type="message_done", message=AgentMessage(role="assistant", content=give_up_text))
+
+    monkeypatch.setattr(chat_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(chat_module, "get_llm_client", lambda: object())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token, user_id = await _register_and_login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        repo_id = await _create_repo(user_id)
+
+        conv_resp = await client.post(f"/api/v1/repos/{repo_id}/conversations", json={"title": "Chat"}, headers=headers)
+        conversation_id = conv_resp.json()["id"]
+
+        async with client.stream(
+            "POST",
+            f"/api/v1/conversations/{conversation_id}/messages",
+            json={"content": "find the thing"},
+            headers=headers,
+        ) as response:
+            assert response.status_code == 200
+            raw = ""
+            async for chunk in response.aiter_text():
+                raw += chunk
+
+        events = _parse_sse_events(raw)
+        assert events[-1]["type"] == "done"
+
+        messages_resp = await client.get(f"/api/v1/conversations/{conversation_id}/messages", headers=headers)
+        messages = messages_resp.json()
+        assert len(messages) == 2
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["content"] == give_up_text
+
+
+@pytest.mark.asyncio
 async def test_send_message_rejects_other_users_conversation(monkeypatch):
     from app.core.llm import FakeLLMClient, ScriptedTurn
 
