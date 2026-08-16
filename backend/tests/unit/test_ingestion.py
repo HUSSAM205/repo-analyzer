@@ -9,18 +9,19 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "sample_repo
 
 
 def test_walk_and_chunk_processes_all_fixture_files():
-    chunks, processed, skipped = walk_and_chunk(FIXTURE_DIR, max_files=100)
-    assert processed == 3
-    assert skipped == 0
-    symbol_names = {c.symbol_name for c in chunks if c.symbol_name}
+    result = walk_and_chunk(FIXTURE_DIR, max_files=100)
+    assert result.files_processed == 3
+    assert result.files_skipped == 0
+    assert len(result.files) == 3
+    symbol_names = {c.symbol_name for c in result.chunks if c.symbol_name}
     assert "greet" in symbol_names
     assert "Greeter" in symbol_names
     assert "add" in symbol_names
 
 
 def test_walk_and_chunk_respects_max_files():
-    chunks, processed, skipped = walk_and_chunk(FIXTURE_DIR, max_files=1)
-    assert processed == 1
+    result = walk_and_chunk(FIXTURE_DIR, max_files=1)
+    assert result.files_processed == 1
 
 
 def test_walk_and_chunk_skips_symlink_pointing_outside_root(tmp_path):
@@ -48,14 +49,15 @@ def test_walk_and_chunk_skips_symlink_pointing_outside_root(tmp_path):
     except OSError as exc:
         pytest.skip(f"cannot create symlinks in this environment (requires elevated privileges): {exc}")
 
-    chunks, processed, skipped = walk_and_chunk(repo_dir, max_files=100)
+    result = walk_and_chunk(repo_dir, max_files=100)
 
     # Only the three legitimate fixture files should be processed; the
     # symlink must be skipped, not read, not chunked.
-    assert processed == 3
-    assert skipped == 1
-    assert not any("SUPER_SECRET_KEY_MATERIAL" in c.content for c in chunks)
-    assert not any(c.file_path == "sneaky_link.py" for c in chunks)
+    assert result.files_processed == 3
+    assert result.files_skipped == 1
+    assert not any("SUPER_SECRET_KEY_MATERIAL" in c.content for c in result.chunks)
+    assert not any(c.file_path == "sneaky_link.py" for c in result.chunks)
+    assert not any("SUPER_SECRET_KEY_MATERIAL" in f.content for f in result.files)
 
 
 def test_walk_and_chunk_skips_file_that_resolves_outside_root(tmp_path):
@@ -76,10 +78,10 @@ def test_walk_and_chunk_skips_file_that_resolves_outside_root(tmp_path):
     except OSError as exc:
         pytest.skip(f"cannot create symlinks in this environment (requires elevated privileges): {exc}")
 
-    chunks, processed, skipped = walk_and_chunk(repo_dir, max_files=100)
+    result = walk_and_chunk(repo_dir, max_files=100)
 
-    assert not any("outside content" in c.content for c in chunks)
-    assert processed == 0
+    assert not any("outside content" in c.content for c in result.chunks)
+    assert result.files_processed == 0
 
 
 def test_walk_and_chunk_skips_symlink_via_monkeypatch(tmp_path, monkeypatch):
@@ -105,11 +107,12 @@ def test_walk_and_chunk_skips_symlink_via_monkeypatch(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
 
-    chunks, processed, skipped = walk_and_chunk(repo_dir, max_files=100)
+    result = walk_and_chunk(repo_dir, max_files=100)
 
-    assert not any(c.file_path == "main.py" for c in chunks)
-    assert processed == 2
-    assert skipped == 1
+    assert not any(c.file_path == "main.py" for c in result.chunks)
+    assert result.files_processed == 2
+    assert result.files_skipped == 1
+    assert not any(f.path == "main.py" for f in result.files)
 
 
 @pytest.mark.slow
@@ -118,3 +121,4 @@ def test_ingest_local_directory_produces_embeddings():
     assert result.files_processed == 3
     assert len(result.chunks) > 0
     assert all(len(cwe.embedding) == 768 for cwe in result.chunks)
+    assert len(result.files) == 3

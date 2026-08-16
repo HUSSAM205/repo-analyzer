@@ -20,8 +20,23 @@ class ChunkWithEmbedding:
 
 
 @dataclass
+class WalkedFile:
+    path: str
+    content: str
+
+
+@dataclass
+class WalkResult:
+    chunks: list[Chunk]
+    files: list[WalkedFile]
+    files_processed: int
+    files_skipped: int
+
+
+@dataclass
 class IngestionResult:
     chunks: list[ChunkWithEmbedding]
+    files: list[WalkedFile]
     files_processed: int
     files_skipped: int
 
@@ -51,8 +66,9 @@ def _should_skip_dir(dir_name: str) -> bool:
     return dir_name in EXCLUDED_DIR_PATTERNS or dir_name.startswith(".")
 
 
-def walk_and_chunk(root_dir: Path, max_files: int) -> tuple[list[Chunk], int, int]:
+def walk_and_chunk(root_dir: Path, max_files: int) -> WalkResult:
     all_chunks: list[Chunk] = []
+    all_files: list[WalkedFile] = []
     files_processed = 0
     files_skipped = 0
     resolved_root = root_dir.resolve()
@@ -102,12 +118,13 @@ def walk_and_chunk(root_dir: Path, max_files: int) -> tuple[list[Chunk], int, in
         try:
             relative_path = str(path.relative_to(root_dir)).replace("\\", "/")
             all_chunks.extend(chunk_file(relative_path, source))
+            all_files.append(WalkedFile(path=relative_path, content=source))
             files_processed += 1
         except Exception:
             files_skipped += 1
             continue
 
-    return all_chunks, files_processed, files_skipped
+    return WalkResult(chunks=all_chunks, files=all_files, files_processed=files_processed, files_skipped=files_skipped)
 
 
 def embed_chunks(chunks: list[Chunk], batch_size: int = 8) -> list[ChunkWithEmbedding]:
@@ -118,6 +135,11 @@ def embed_chunks(chunks: list[Chunk], batch_size: int = 8) -> list[ChunkWithEmbe
 
 
 def ingest_local_directory(root_dir: Path, max_files: int) -> IngestionResult:
-    chunks, processed, skipped = walk_and_chunk(root_dir, max_files)
-    embedded = embed_chunks(chunks)
-    return IngestionResult(chunks=embedded, files_processed=processed, files_skipped=skipped)
+    walk_result = walk_and_chunk(root_dir, max_files)
+    embedded = embed_chunks(walk_result.chunks)
+    return IngestionResult(
+        chunks=embedded,
+        files=walk_result.files,
+        files_processed=walk_result.files_processed,
+        files_skipped=walk_result.files_skipped,
+    )

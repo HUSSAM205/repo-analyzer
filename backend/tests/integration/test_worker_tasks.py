@@ -131,6 +131,57 @@ async def test_analyze_repo_task_reanalysis_does_not_duplicate_chunks(local_git_
 
 
 @pytest.mark.asyncio
+async def test_analyze_repo_task_reanalysis_does_not_duplicate_files(local_git_repo_url):
+    from app.db.models import File
+
+    async with async_session_maker() as db:
+        user = User(email=f"worker-{uuid.uuid4()}@example.com", hashed_password="hashed")
+        db.add(user)
+        await db.flush()
+
+        repo = Repo(user_id=user.id, url=local_git_repo_url, name="local-repo", status=RepoStatus.PENDING)
+        db.add(repo)
+        await db.flush()
+
+        job1 = Job(repo_id=repo.id, status=JobStatus.PENDING)
+        db.add(job1)
+        await db.commit()
+        job1_id = str(job1.id)
+        repo_id = repo.id
+        user_id = user.id
+
+    await analyze_repo({}, job1_id)
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(File).where(File.repo_id == repo_id))
+        count_after_first = len(result.scalars().all())
+        assert count_after_first > 0
+
+        job2 = Job(repo_id=repo_id, status=JobStatus.PENDING)
+        db.add(job2)
+        await db.commit()
+        job2_id = str(job2.id)
+
+    await analyze_repo({}, job2_id)
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(File).where(File.repo_id == repo_id))
+        files_after_second = result.scalars().all()
+        assert len(files_after_second) == count_after_first
+
+        for f in files_after_second:
+            await db.delete(f)
+        result = await db.execute(select(Job).where(Job.repo_id == repo_id))
+        for job in result.scalars().all():
+            await db.delete(job)
+        refreshed_repo = await db.get(Repo, repo_id)
+        await db.delete(refreshed_repo)
+        refreshed_user = await db.get(User, user_id)
+        await db.delete(refreshed_user)
+        await db.commit()
+
+
+@pytest.mark.asyncio
 async def test_analyze_repo_task_marks_failed_on_bad_url():
     async with async_session_maker() as db:
         user = User(email=f"worker-{uuid.uuid4()}@example.com", hashed_password="hashed")

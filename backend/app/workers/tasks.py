@@ -7,7 +7,7 @@ from sqlalchemy import delete
 
 from app.config import get_settings
 from app.core.ingestion import CloneError, RepoTooLargeError, clone_repo, embed_chunks, walk_and_chunk
-from app.db.models import CodeChunk, Job, JobStatus, NodeType, Repo, RepoStatus
+from app.db.models import CodeChunk, File, Job, JobStatus, NodeType, Repo, RepoStatus
 from app.db.session import async_session_maker
 
 settings = get_settings()
@@ -31,11 +31,11 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
                     max_size_mb=settings.max_repo_size_mb,
                     timeout_seconds=settings.clone_timeout_seconds,
                 )
-                chunks, _processed, skipped = walk_and_chunk(clone_path, max_files=settings.max_files_per_repo)
+                walk_result = walk_and_chunk(clone_path, max_files=settings.max_files_per_repo)
                 job.progress = 50
                 await db.commit()
 
-                embedded = embed_chunks(chunks)
+                embedded = embed_chunks(walk_result.chunks)
                 job.progress = 90
                 await db.commit()
 
@@ -48,6 +48,7 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
                 # the whole transaction rolls back and the old chunks are
                 # restored rather than left half-deleted.
                 await db.execute(delete(CodeChunk).where(CodeChunk.repo_id == repo.id))
+                await db.execute(delete(File).where(File.repo_id == repo.id))
 
                 for item in embedded:
                     db.add(
@@ -63,7 +64,10 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
                         )
                     )
 
-                job.skipped_files = skipped
+                for walked_file in walk_result.files:
+                    db.add(File(repo_id=repo.id, path=walked_file.path, content=walked_file.content))
+
+                job.skipped_files = walk_result.files_skipped
                 job.status = JobStatus.COMPLETED
                 job.progress = 100
                 job.finished_at = datetime.now(timezone.utc)
