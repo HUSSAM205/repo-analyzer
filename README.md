@@ -53,8 +53,8 @@ curl -X POST http://localhost:8000/api/v1/search \
 ## Chat with a repo (sub-project 2A)
 
 Once a repo has finished analyzing, you can open a conversation and ask
-questions about it. This requires a real LLM API key (Anthropic or
-OpenAI) — without one, the chat endpoint returns a clean SSE `error`
+questions about it. This requires a real LLM API key (Anthropic, OpenAI, or
+Gemini) — without one, the chat endpoint returns a clean SSE `error`
 event rather than crashing, but won't produce real answers.
 
 1. Add to `backend/.env`:
