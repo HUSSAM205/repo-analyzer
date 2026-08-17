@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_owned_conversation
+from app.api.deps import get_current_user, get_conversation_or_404
 from app.core.agent import run_agent
 from app.core.agent_tools import search_code
 from app.core.llm import Message as AgentMessage
@@ -67,7 +67,7 @@ async def send_message(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StreamingResponse:
-    conversation = await get_owned_conversation(db, conversation_id, current_user)
+    conversation = await get_conversation_or_404(db, conversation_id, current_user)
     repo_id = conversation.repo_id
     conversation_id_value = conversation.id
 

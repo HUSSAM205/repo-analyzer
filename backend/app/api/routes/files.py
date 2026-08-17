@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_owned_repo
+from app.api.deps import get_current_user, get_repo_or_404
 from app.db.models import File, User
 from app.db.session import get_db
 from app.schemas.files import FileContentResponse, FileTreeEntry, FileTreeResponse
@@ -49,7 +49,7 @@ async def get_file_tree(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> FileTreeResponse:
-    await get_owned_repo(db, repo_id, current_user)
+    await get_repo_or_404(db, repo_id, current_user)
     result = await db.execute(select(File.path).where(File.repo_id == repo_id))
     paths = sorted(result.scalars().all())
     return FileTreeResponse(entries=_build_tree(paths))
@@ -62,7 +62,7 @@ async def get_file_content(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> FileContentResponse:
-    await get_owned_repo(db, repo_id, current_user)
+    await get_repo_or_404(db, repo_id, current_user)
     result = await db.execute(select(File).where(File.repo_id == repo_id, File.path == path))
     file = result.scalar_one_or_none()
     if file is None:

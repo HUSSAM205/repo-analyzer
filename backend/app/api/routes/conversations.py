@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_owned_conversation, get_owned_repo
+from app.api.deps import get_current_user, get_conversation_or_404, get_repo_or_404
 from app.db.models import Conversation, Message, User
 from app.db.session import get_db
 from app.schemas.chat import ConversationCreate, ConversationResponse, MessageResponse
@@ -20,7 +20,7 @@ async def create_conversation(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Conversation:
-    await get_owned_repo(db, repo_id, current_user)
+    await get_repo_or_404(db, repo_id, current_user)
     conversation = Conversation(repo_id=repo_id, user_id=current_user.id, title=payload.title)
     db.add(conversation)
     await db.commit()
@@ -34,10 +34,10 @@ async def list_conversations(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[Conversation]:
-    await get_owned_repo(db, repo_id, current_user)
+    await get_repo_or_404(db, repo_id, current_user)
     result = await db.execute(
         select(Conversation)
-        .where(Conversation.repo_id == repo_id, Conversation.user_id == current_user.id)
+        .where(Conversation.repo_id == repo_id)
         .order_by(Conversation.created_at.desc())
     )
     return list(result.scalars().all())
@@ -49,7 +49,7 @@ async def get_messages(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[Message]:
-    conversation = await get_owned_conversation(db, conversation_id, current_user)
+    conversation = await get_conversation_or_404(db, conversation_id, current_user)
     result = await db.execute(
         select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)
     )

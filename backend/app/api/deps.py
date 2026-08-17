@@ -30,15 +30,21 @@ async def get_current_user(
     return user
 
 
-async def get_owned_repo(db: AsyncSession, repo_id: UUID, user: User) -> Repo:
+async def get_repo_or_404(db: AsyncSession, repo_id: UUID, user: User) -> Repo:
+    # `user` is intentionally unused now -- kept in the signature so every
+    # call site (files.py, conversations.py, jobs.py's inline check) needs
+    # no argument-list change from the ownership-checked version this
+    # replaces, only an import/name rename. Reads are public: any resource
+    # that exists is readable by any valid token holder, per the approved
+    # "fully public by URL" design (see the sub-project 3A spec).
     repo = await db.get(Repo, repo_id)
-    if repo is None or repo.user_id != user.id:
+    if repo is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found")
     return repo
 
 
-async def get_owned_conversation(db: AsyncSession, conversation_id: UUID, user: User) -> Conversation:
+async def get_conversation_or_404(db: AsyncSession, conversation_id: UUID, user: User) -> Conversation:
     conversation = await db.get(Conversation, conversation_id)
-    if conversation is None or conversation.user_id != user.id:
+    if conversation is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     return conversation

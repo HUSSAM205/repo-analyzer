@@ -59,7 +59,7 @@ async def test_get_nonexistent_job_returns_404():
 
 
 @pytest.mark.asyncio
-async def test_get_job_rejects_other_users_job():
+async def test_get_job_accessible_by_other_users():
     # Mirrors the cross-user rejection test in test_search_api.py: one user
     # creates a job via /repos/analyze, a second user must not be able to
     # read its status/progress/error_message via GET /jobs/{id}.
@@ -83,7 +83,7 @@ async def test_get_job_rejects_other_users_job():
         other_resp = await client.get(
             f"/api/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {other_token}"}
         )
-        assert other_resp.status_code == 404
+        assert other_resp.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -106,3 +106,32 @@ async def test_list_repos_returns_only_the_requesting_users_repos():
         other_list_resp = await client.get("/api/v1/repos", headers=other_headers)
         assert other_list_resp.status_code == 200
         assert other_list_resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_get_repo_by_id_accessible_by_other_users():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        owner_token = await _register_and_login(client)
+        analyze_resp = await client.post(
+            "/api/v1/repos/analyze",
+            json={"repo_url": "https://github.com/octocat/get-repo-test"},
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        repo_id = analyze_resp.json()["repo_id"]
+
+        owner_resp = await client.get(f"/api/v1/repos/{repo_id}", headers={"Authorization": f"Bearer {owner_token}"})
+        assert owner_resp.status_code == 200
+        assert owner_resp.json()["id"] == repo_id
+
+        other_token = await _register_and_login(client)
+        other_resp = await client.get(f"/api/v1/repos/{repo_id}", headers={"Authorization": f"Bearer {other_token}"})
+        assert other_resp.status_code == 200
+        assert other_resp.json()["id"] == repo_id
+
+
+@pytest.mark.asyncio
+async def test_get_repo_by_id_returns_404_for_nonexistent_repo():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _register_and_login(client)
+        resp = await client.get(f"/api/v1/repos/{uuid.uuid4()}", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 404

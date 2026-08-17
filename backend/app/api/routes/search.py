@@ -21,7 +21,7 @@ async def search_repo(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SearchResponse:
     repo = await db.get(Repo, payload.repo_id)
-    if repo is None or repo.user_id != current_user.id:
+    if repo is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found")
 
     query_embedding = await run_in_threadpool(embed_text, payload.query)

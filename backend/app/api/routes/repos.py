@@ -1,3 +1,4 @@
+from uuid import UUID
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
@@ -5,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.arq_pool import get_arq_pool
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_repo_or_404
 from app.core.rate_limit import enforce_analyze_rate_limit
 from app.db.models import Job, Repo, RepoStatus, User
 from app.db.session import get_db
@@ -53,3 +54,12 @@ async def list_repos(
         select(Repo).where(Repo.user_id == current_user.id).order_by(Repo.created_at.desc())
     )
     return list(result.scalars().all())
+
+
+@router.get("/{repo_id}", response_model=RepoResponse)
+async def get_repo(
+    repo_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Repo:
+    return await get_repo_or_404(db, repo_id, current_user)

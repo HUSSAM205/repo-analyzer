@@ -382,7 +382,7 @@ async def test_send_message_persists_give_up_message_with_no_preceding_tokens(mo
 
 
 @pytest.mark.asyncio
-async def test_send_message_rejects_other_users_conversation(monkeypatch):
+async def test_send_message_accessible_by_other_users_conversation(monkeypatch):
     from app.core.llm import FakeLLMClient, ScriptedTurn
 
     monkeypatch.setattr(
@@ -398,9 +398,17 @@ async def test_send_message_rejects_other_users_conversation(monkeypatch):
         conversation_id = conv_resp.json()["id"]
 
         other_token, _ = await _register_and_login(client)
-        resp = await client.post(
+        async with client.stream(
+            "POST",
             f"/api/v1/conversations/{conversation_id}/messages",
             json={"content": "hi"},
             headers={"Authorization": f"Bearer {other_token}"},
-        )
-        assert resp.status_code == 404
+        ) as response:
+            assert response.status_code == 200
+            raw = ""
+            async for chunk in response.aiter_text():
+                raw += chunk
+
+        events = _parse_sse_events(raw)
+        assert any(e["type"] == "token" for e in events)
+        assert events[-1]["type"] == "done"

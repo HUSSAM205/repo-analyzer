@@ -58,7 +58,7 @@ async def test_file_tree_and_content_flow():
 
 
 @pytest.mark.asyncio
-async def test_files_endpoints_reject_other_users_repo():
+async def test_files_endpoints_accessible_by_other_users():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         owner_token = await _register_and_login(client)
         owner_headers = {"Authorization": f"Bearer {owner_token}"}
@@ -68,6 +68,8 @@ async def test_files_endpoints_reject_other_users_repo():
         async with async_session_maker() as db:
             repo = Repo(user_id=owner_id, url="https://github.com/example/privatefiles", name="privatefiles", status=RepoStatus.READY)
             db.add(repo)
+            await db.flush()
+            db.add(File(repo_id=repo.id, path="anything.py", content="print('hi')"))
             await db.commit()
             repo_id = str(repo.id)
 
@@ -75,9 +77,10 @@ async def test_files_endpoints_reject_other_users_repo():
         other_headers = {"Authorization": f"Bearer {other_token}"}
 
         tree_resp = await client.get(f"/api/v1/repos/{repo_id}/files", headers=other_headers)
-        assert tree_resp.status_code == 404
+        assert tree_resp.status_code == 200
 
         content_resp = await client.get(
             f"/api/v1/repos/{repo_id}/files/content", params={"path": "anything.py"}, headers=other_headers
         )
-        assert content_resp.status_code == 404
+        assert content_resp.status_code == 200
+        assert content_resp.json()["content"] == "print('hi')"

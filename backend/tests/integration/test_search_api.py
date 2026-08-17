@@ -46,7 +46,7 @@ async def test_search_endpoint_returns_matching_chunk():
 
 
 @pytest.mark.asyncio
-async def test_search_endpoint_rejects_other_users_repo():
+async def test_search_endpoint_accessible_by_other_users():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         owner_email = f"owner-{uuid.uuid4()}@example.com"
         await client.post("/api/v1/auth/register", json={"email": owner_email, "password": "supersecret123"})
@@ -70,4 +70,5 @@ async def test_search_endpoint_rejects_other_users_repo():
             "/api/v1/search", json={"repo_id": repo_id, "query": "anything"},
             headers={"Authorization": f"Bearer {other_token}"},
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        assert resp.json()["results"] == []

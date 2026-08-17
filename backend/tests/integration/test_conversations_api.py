@@ -49,9 +49,22 @@ async def test_create_list_conversations_and_empty_message_history():
         assert messages_resp.status_code == 200
         assert messages_resp.json() == []
 
+        other_token = await _register_and_login(client)
+        other_headers = {"Authorization": f"Bearer {other_token}"}
+        other_create_resp = await client.post(
+            f"/api/v1/repos/{repo_id}/conversations", json={"title": "Second chat"}, headers=other_headers
+        )
+        assert other_create_resp.status_code == 201
+
+        combined_list_resp = await client.get(f"/api/v1/repos/{repo_id}/conversations", headers=headers)
+        assert combined_list_resp.status_code == 200
+        assert len(combined_list_resp.json()) == 2
+        titles = {c["title"] for c in combined_list_resp.json()}
+        assert titles == {"First chat", "Second chat"}
+
 
 @pytest.mark.asyncio
-async def test_conversation_endpoints_reject_other_users():
+async def test_conversation_endpoints_accessible_by_other_users():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         owner_token = await _register_and_login(client)
         owner_headers = {"Authorization": f"Bearer {owner_token}"}
@@ -67,10 +80,11 @@ async def test_conversation_endpoints_reject_other_users():
         other_token = await _register_and_login(client)
         other_headers = {"Authorization": f"Bearer {other_token}"}
 
-        assert (await client.get(f"/api/v1/repos/{repo_id}/conversations", headers=other_headers)).status_code == 404
-        assert (
-            await client.post(f"/api/v1/repos/{repo_id}/conversations", json={"title": "x"}, headers=other_headers)
-        ).status_code == 404
+        assert (await client.get(f"/api/v1/repos/{repo_id}/conversations", headers=other_headers)).status_code == 200
+        create_by_other = await client.post(
+            f"/api/v1/repos/{repo_id}/conversations", json={"title": "x"}, headers=other_headers
+        )
+        assert create_by_other.status_code == 201
         assert (
             await client.get(f"/api/v1/conversations/{conversation_id}/messages", headers=other_headers)
-        ).status_code == 404
+        ).status_code == 200
