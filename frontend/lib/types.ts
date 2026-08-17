@@ -36,3 +36,14 @@ export interface AnalyzeRepoResponse {
   repo_id: string;
   job_id: string;
 }
+
+export interface FileTreeEntry {
+  name: string;
+  path: string;
+  type: "file" | "directory";
+  children: FileTreeEntry[] | null;
+}
+
+export interface FileTreeResponse {
+  entries: FileTreeEntry[];
+}
