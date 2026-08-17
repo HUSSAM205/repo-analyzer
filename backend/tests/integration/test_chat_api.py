@@ -412,3 +412,29 @@ async def test_send_message_accessible_by_other_users_conversation(monkeypatch):
         events = _parse_sse_events(raw)
         assert any(e["type"] == "token" for e in events)
         assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_send_message_rate_limited_after_capacity(monkeypatch):
+    from app.core.llm import FakeLLMClient, ScriptedTurn
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token, user_id = await _register_and_login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        repo_id = await _create_repo(user_id)
+        conv_resp = await client.post(f"/api/v1/repos/{repo_id}/conversations", json={"title": "Chat"}, headers=headers)
+        conversation_id = conv_resp.json()["id"]
+
+        last_status = None
+        for _ in range(10):
+            monkeypatch.setattr(
+                "app.api.routes.chat.get_llm_client",
+                lambda: FakeLLMClient(turns=[ScriptedTurn(text="ok")]),
+            )
+            resp = await client.post(
+                f"/api/v1/conversations/{conversation_id}/messages",
+                json={"content": "hi"},
+                headers=headers,
+            )
+            last_status = resp.status_code
+        assert last_status == 429

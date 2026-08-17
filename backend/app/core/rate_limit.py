@@ -70,3 +70,17 @@ async def enforce_analyze_rate_limit(current_user: Annotated[User, Depends(get_c
             detail="Rate limit exceeded for repo analysis requests. Try again shortly.",
         )
     return current_user
+
+
+async def enforce_chat_rate_limit(current_user: Annotated[User, Depends(get_current_user)]) -> User:
+    allowed = await check_token_bucket(
+        key=f"rate_limit:chat:{current_user.id}",
+        capacity=settings.rate_limit_bucket_capacity,
+        refill_per_minute=settings.rate_limit_chat_per_minute,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded for chat messages. Try again shortly.",
+        )
+    return current_user

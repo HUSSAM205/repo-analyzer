@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     rate_limit_analyze_per_minute: int = 5
     rate_limit_bucket_capacity: int = 5
+    rate_limit_chat_per_minute: int = 15
 
     llm_provider: Literal["anthropic", "openai", "fake"] = "anthropic"
     anthropic_api_key: str | None = None

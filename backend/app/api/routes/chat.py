@@ -9,8 +9,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_conversation_or_404
+from app.api.deps import get_conversation_or_404
 from app.core.agent import run_agent
+from app.core.rate_limit import enforce_chat_rate_limit
 from app.core.agent_tools import search_code
 from app.core.llm import Message as AgentMessage
 from app.core.llm_providers import get_llm_client
@@ -64,7 +65,7 @@ def _sse_event(event_type: str, data: dict) -> str:
 async def send_message(
     conversation_id: UUID,
     payload: SendMessageRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(enforce_chat_rate_limit)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StreamingResponse:
     conversation = await get_conversation_or_404(db, conversation_id, current_user)
