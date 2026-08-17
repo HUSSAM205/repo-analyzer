@@ -8,7 +8,7 @@ export async function GET(request: Request, { params }: { params: { repoId: stri
     return NextResponse.json({ detail: "Not authenticated" }, { status: 401 });
   }
 
-  const backendResponse = await fetch(backendUrl(`/api/v1/repos/${params.repoId}/files`), {
+  const backendResponse = await fetch(backendUrl(`/api/v1/repos/${encodeURIComponent(params.repoId)}/files`), {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
   });

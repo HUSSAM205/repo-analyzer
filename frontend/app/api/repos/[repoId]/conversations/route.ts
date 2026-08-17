@@ -8,7 +8,7 @@ export async function GET(request: NextRequest, { params }: { params: { repoId: 
     return NextResponse.json({ detail: "Not authenticated" }, { status: 401 });
   }
 
-  const backendResponse = await fetch(backendUrl(`/api/v1/repos/${params.repoId}/conversations`), {
+  const backendResponse = await fetch(backendUrl(`/api/v1/repos/${encodeURIComponent(params.repoId)}/conversations`), {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
   });
@@ -28,7 +28,7 @@ export async function POST(request: NextRequest, { params }: { params: { repoId:
 
   const body = await request.json().catch(() => ({}));
 
-  const backendResponse = await fetch(backendUrl(`/api/v1/repos/${params.repoId}/conversations`), {
+  const backendResponse = await fetch(backendUrl(`/api/v1/repos/${encodeURIComponent(params.repoId)}/conversations`), {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify(body),

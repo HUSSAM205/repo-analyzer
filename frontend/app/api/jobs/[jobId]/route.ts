@@ -8,7 +8,7 @@ export async function GET(request: Request, { params }: { params: { jobId: strin
     return NextResponse.json({ detail: "Not authenticated" }, { status: 401 });
   }
 
-  const backendResponse = await fetch(backendUrl(`/api/v1/jobs/${params.jobId}`), {
+  const backendResponse = await fetch(backendUrl(`/api/v1/jobs/${encodeURIComponent(params.jobId)}`), {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
   });

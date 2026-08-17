@@ -67,6 +67,14 @@ services:
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+    # Lets this container reach a server on the host machine via
+    # "host.docker.internal" -- Docker Desktop (Windows/Mac) wires this up
+    # automatically, but plain Docker Engine on Linux needs it declared
+    # explicitly. Used by the Playwright e2e suite's local fixture-repo git
+    # server (frontend/tests/e2e/fixture-git-server.ts, see frontend/README.md)
+    # so `analyze_repo`'s clone doesn't depend on github.com being reachable.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy

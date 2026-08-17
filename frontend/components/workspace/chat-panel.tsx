@@ -20,6 +20,7 @@ export function ChatPanel({ repoId }: { repoId: string }) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [statusText, setStatusText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [failedMessage, setFailedMessage] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
 
   const scrollViewportRef = useRef<HTMLDivElement>(null);
@@ -116,6 +117,7 @@ export function ChatPanel({ repoId }: { repoId: string }) {
   async function handleSend(content: string) {
     if (!activeId) return;
     setError(null);
+    setFailedMessage(null);
     setMessages((prev) => [
       ...prev,
       { id: `local-${Date.now()}`, role: "user", content, created_at: new Date().toISOString() },
@@ -133,6 +135,7 @@ export function ChatPanel({ repoId }: { repoId: string }) {
       });
       if (!res.ok || !res.body) {
         setError("Could not send that message. Please try again.");
+        setFailedMessage(content);
         setIsStreaming(false);
         return;
       }
@@ -185,15 +188,22 @@ export function ChatPanel({ repoId }: { repoId: string }) {
             setStatusText(null);
           } else if (event.type === "error") {
             setError((event.data as { message?: string }).message ?? "The assistant hit an error.");
+            setFailedMessage(content);
             setStatusText(null);
           }
         }
       }
     } catch {
       setError("Connection lost while streaming the response.");
+      setFailedMessage(content);
     } finally {
       setIsStreaming(false);
     }
+  }
+
+  function handleRetry() {
+    if (!failedMessage) return;
+    handleSend(failedMessage);
   }
 
   return (
@@ -232,7 +242,16 @@ export function ChatPanel({ repoId }: { repoId: string }) {
                 {streamingText && <ChatMessage role="assistant" content={streamingText} />}
               </div>
             )}
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {error && (
+              <div className="flex items-center gap-2 text-sm text-destructive">
+                <p>{error}</p>
+                {failedMessage && (
+                  <Button size="sm" variant="outline" onClick={handleRetry} disabled={isStreaming}>
+                    Retry
+                  </Button>
+                )}
+              </div>
+            )}
             <div ref={bottomRef} />
           </div>
         </ScrollArea>

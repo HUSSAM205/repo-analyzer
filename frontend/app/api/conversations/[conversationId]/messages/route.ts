@@ -10,7 +10,7 @@ export async function GET(request: Request, { params }: { params: { conversation
     return NextResponse.json({ detail: "Not authenticated" }, { status: 401 });
   }
 
-  const backendResponse = await fetch(backendUrl(`/api/v1/conversations/${params.conversationId}/messages`), {
+  const backendResponse = await fetch(backendUrl(`/api/v1/conversations/${encodeURIComponent(params.conversationId)}/messages`), {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
   });
@@ -30,7 +30,7 @@ export async function POST(request: Request, { params }: { params: { conversatio
 
   const body = await request.text();
 
-  const backendResponse = await fetch(backendUrl(`/api/v1/conversations/${params.conversationId}/messages`), {
+  const backendResponse = await fetch(backendUrl(`/api/v1/conversations/${encodeURIComponent(params.conversationId)}/messages`), {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body,

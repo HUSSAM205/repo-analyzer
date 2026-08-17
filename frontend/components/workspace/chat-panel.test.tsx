@@ -104,6 +104,57 @@ describe("ChatPanel streaming", () => {
   });
 });
 
+describe("ChatPanel error retry", () => {
+  it("keeps the failed message available and resends it via the existing send logic when Retry is clicked", async () => {
+    const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+    let messagesPostCount = 0;
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        messagesPostCount += 1;
+        expect(JSON.parse(init?.body as string)).toEqual({ content: "Find the answer" });
+        if (messagesPostCount === 1) {
+          // First attempt fails outright (e.g. the backend was briefly
+          // unreachable) -- no body at all, mirroring the `!res.ok` path.
+          return Promise.resolve({ ok: false, body: null } as unknown as Response);
+        }
+        // Retry succeeds.
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([sseFrame("token", { text: "Here is the answer." }), sseFrame("done", { message_id: "m2" })]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "Find the answer");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    expect(await screen.findByText("Could not send that message. Please try again.")).toBeInTheDocument();
+    const retryButton = screen.getByRole("button", { name: "Retry" });
+
+    await userEvent.click(retryButton);
+
+    expect(await screen.findByText("Here is the answer.")).toBeInTheDocument();
+    expect(messagesPostCount).toBe(2);
+    expect(screen.queryByText("Could not send that message. Please try again.")).not.toBeInTheDocument();
+  });
+});
+
 describe("ChatPanel auto-scroll", () => {
   function mockScrollMetrics(
     el: Element,

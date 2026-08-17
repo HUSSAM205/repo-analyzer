@@ -118,7 +118,15 @@ then `uvicorn app.main:app --reload` from `backend/`) at
   `LLM_PROVIDER=fake` (no real API key needed — see below) so the chat
   step gets a deterministic scripted reply. `npx playwright test`
   (from `frontend/`, after `npx playwright install --with-deps
-  chromium` once).
+  chromium` once). No live GitHub calls either: a `globalSetup`
+  (`tests/e2e/global-setup.ts`) spins up a local git server serving
+  the same fixture repo sub-project 1's worker tests use
+  (`backend/tests/fixtures/sample_repo`) over dumb HTTP, and the suite
+  submits that URL instead of a real GitHub URL. If the backend under
+  test is running in a container that can't reach the host machine as
+  `127.0.0.1` (e.g. the `worker` service in `docker compose`), set
+  `E2E_FIXTURE_REPO_HOST=host.docker.internal` before running
+  `playwright test`.
 
 ### Fake LLM provider mode
 

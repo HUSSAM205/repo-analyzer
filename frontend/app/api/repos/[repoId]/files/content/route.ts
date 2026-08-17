@@ -14,7 +14,9 @@ export async function GET(request: NextRequest, { params }: { params: { repoId: 
   }
 
   const backendResponse = await fetch(
-    backendUrl(`/api/v1/repos/${params.repoId}/files/content?path=${encodeURIComponent(path)}`),
+    backendUrl(
+      `/api/v1/repos/${encodeURIComponent(params.repoId)}/files/content?path=${encodeURIComponent(path)}`
+    ),
     { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
   );
 
