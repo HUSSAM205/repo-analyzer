@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TextEncoder, TextDecoder } from "util";
 import { ChatPanel } from "./chat-panel";
@@ -101,5 +101,57 @@ describe("ChatPanel streaming", () => {
       await screen.findByText("I couldn't find a definitive answer after searching the code.")
     ).toBeInTheDocument();
     expect(messagesGetCount).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("ChatPanel auto-scroll", () => {
+  function mockScrollMetrics(
+    el: Element,
+    metrics: { scrollHeight: number; scrollTop: number; clientHeight: number }
+  ) {
+    Object.defineProperty(el, "scrollHeight", { value: metrics.scrollHeight, configurable: true });
+    Object.defineProperty(el, "scrollTop", { value: metrics.scrollTop, configurable: true });
+    Object.defineProperty(el, "clientHeight", { value: metrics.clientHeight, configurable: true });
+  }
+
+  it("only turns auto-follow off on real user-input scroll events (wheel/touch), never on a bare 'scroll' event", async () => {
+    // Regression test for the fix: the app's own scroll-to-bottom calls
+    // (the auto-follow effect, the "jump to bottom" button) fire native
+    // "scroll" events indistinguishable from a user's own scroll by event
+    // shape alone -- including at every intermediate frame of a "smooth"
+    // scrollIntoView animation. If a bare "scroll" event could flip
+    // auto-follow off, the app could self-cancel its own auto-follow with
+    // no user action at all. Only genuine input events (wheel, touch)
+    // should be able to do that.
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => [] }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const viewport = document.querySelector("[data-radix-scroll-area-viewport]");
+    if (!viewport) throw new Error("scroll viewport not found in the rendered ScrollArea");
+
+    // Simulate scroll position "far from bottom" (500px of the 1000px
+    // scrollHeight still below the visible 500px clientHeight).
+    mockScrollMetrics(viewport, { scrollHeight: 1000, scrollTop: 0, clientHeight: 500 });
+
+    fireEvent.scroll(viewport);
+    expect(screen.queryByText("Jump to bottom")).not.toBeInTheDocument();
+
+    fireEvent.wheel(viewport);
+    expect(await screen.findByText("Jump to bottom")).toBeInTheDocument();
+  });
+
+  it("turns auto-follow off on a touch-drag scroll (touchstart/touchmove), not just wheel", async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => [] }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const viewport = document.querySelector("[data-radix-scroll-area-viewport]");
+    if (!viewport) throw new Error("scroll viewport not found in the rendered ScrollArea");
+
+    mockScrollMetrics(viewport, { scrollHeight: 1000, scrollTop: 0, clientHeight: 500 });
+
+    fireEvent.touchStart(viewport);
+    expect(await screen.findByText("Jump to bottom")).toBeInTheDocument();
   });
 });

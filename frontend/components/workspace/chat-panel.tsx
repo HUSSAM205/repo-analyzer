@@ -24,35 +24,50 @@ export function ChatPanel({ repoId }: { repoId: string }) {
 
   const scrollViewportRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  // Guards handleScroll against the app's own scroll-to-bottom calls. A
-  // `scrollIntoView({ behavior: "smooth" })` animates over several frames,
-  // firing native "scroll" events along the way -- and handleScroll can't
-  // tell those apart from the user grabbing the scrollbar. Without this,
-  // an in-flight auto-follow animation (or the "jump to bottom" button's own
-  // scroll) can be measured mid-flight, read as "far from bottom", and
-  // permanently kill auto-follow with no user action at all. Set to true
-  // right before every programmatic scroll and cleared a bit after the
-  // *last* one settles (see scrollToBottom below); handleScroll no-ops
-  // while it's true.
-  const programmaticScrollRef = useRef(false);
-  const clearProgrammaticScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function scrollToBottom(behavior: ScrollBehavior) {
-    programmaticScrollRef.current = true;
-    if (clearProgrammaticScrollTimeoutRef.current) {
-      clearTimeout(clearProgrammaticScrollTimeoutRef.current);
-    }
     bottomRef.current?.scrollIntoView({ behavior });
-    // 600ms comfortably outlasts a "smooth" scrollIntoView animation over a
-    // chat-panel-sized distance in evergreen browsers. Not using the
-    // "scrollend" event because it isn't universally supported yet; a
-    // generous fixed delay, re-armed on every call, is simpler and safe
-    // here since the only cost of guarding a little too long is briefly
-    // ignoring a real user scroll during active streaming.
-    clearProgrammaticScrollTimeoutRef.current = setTimeout(() => {
-      programmaticScrollRef.current = false;
-    }, 600);
   }
+
+  // Auto-follow should turn off only when the user actually scrolls away
+  // themselves -- never as a side effect of the app's own scroll-to-bottom
+  // calls (the auto-follow effect below, and the "jump to bottom" button).
+  // A native "scroll" event can't distinguish the two: it fires identically
+  // whether scrollTop changed because of a user's wheel/touch gesture or
+  // because `scrollIntoView` moved it programmatically, including at every
+  // intermediate frame of a "smooth" scroll's animation. An earlier version
+  // of this guarded against that with a timing heuristic (a ref flag armed
+  // before each programmatic scroll, cleared a fixed delay afterward) --
+  // but real streaming chunks arrive faster than that delay, so the guard
+  // stayed continuously re-armed for the whole duration of a live stream
+  // and a genuine user scroll-up got ignored until the stream paused.
+  //
+  // Fixed properly here: only ever evaluate "has the user scrolled away
+  // from the bottom" from listeners on genuine user-input event types --
+  // "wheel" (mouse/trackpad) and "touchstart"/"touchmove" (touch drag).
+  // `scrollIntoView` never dispatches any of these, so there is no event
+  // for a programmatic scroll to be mistaken for, at any point in its
+  // animation, with no timing window to guess at. The generic "scroll"
+  // event is not listened to at all for this purpose.
+  useEffect(() => {
+    const el = scrollViewportRef.current;
+    if (!el) return;
+
+    function evaluateUserScrollPosition() {
+      if (!el) return;
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      setAutoScroll(distanceFromBottom < 80);
+    }
+
+    el.addEventListener("wheel", evaluateUserScrollPosition, { passive: true });
+    el.addEventListener("touchstart", evaluateUserScrollPosition, { passive: true });
+    el.addEventListener("touchmove", evaluateUserScrollPosition, { passive: true });
+    return () => {
+      el.removeEventListener("wheel", evaluateUserScrollPosition);
+      el.removeEventListener("touchstart", evaluateUserScrollPosition);
+      el.removeEventListener("touchmove", evaluateUserScrollPosition);
+    };
+  }, []);
 
   async function refetchMessages(conversationId: string) {
     const res = await apiFetch(`/api/conversations/${conversationId}/messages`, { cache: "no-store" });
@@ -85,14 +100,6 @@ export function ChatPanel({ repoId }: { repoId: string }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, streamingText, autoScroll]);
-
-  function handleScroll() {
-    if (programmaticScrollRef.current) return;
-    const el = scrollViewportRef.current;
-    if (!el) return;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setAutoScroll(distanceFromBottom < 80);
-  }
 
   async function handleCreate() {
     const res = await apiFetch(`/api/repos/${repoId}/conversations`, {
@@ -198,7 +205,7 @@ export function ChatPanel({ repoId }: { repoId: string }) {
         onCreate={handleCreate}
       />
       <div className="relative min-h-0 flex-1">
-        <ScrollArea className="h-full p-3" viewportRef={scrollViewportRef} onScroll={handleScroll}>
+        <ScrollArea className="h-full p-3" viewportRef={scrollViewportRef}>
           <div className="space-y-3">
             {messages.length === 0 && !isStreaming && (
               <p className="p-4 text-center text-sm text-muted-foreground">
