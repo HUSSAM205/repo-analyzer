@@ -7,12 +7,19 @@ import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { FileTree } from "@/components/workspace/file-tree";
 import { CodeViewer } from "@/components/workspace/code-viewer";
 import { ChatPanel } from "@/components/workspace/chat-panel";
+import { useJobPolling } from "@/components/workspace/use-job-polling";
 import { apiFetch } from "@/lib/api-client";
 import type { Repo } from "@/lib/types";
 
 export default function RepoWorkspacePage({ params }: { params: { repoId: string } }) {
   const searchParams = useSearchParams();
   const jobId = searchParams.get("job") ?? undefined;
+
+  // Owned once here and passed down to both RepoHeader (status dot) and
+  // FileTree (re-fetch trigger) so the same analysis job is only polled
+  // once per page instead of each child running its own independent poll
+  // of GET /api/jobs/{id}.
+  const { job, polling } = useJobPolling(jobId);
 
   const [repo, setRepo] = useState<Repo | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
@@ -53,9 +60,9 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
 
   return (
     <>
-      <RepoHeader repo={repo} jobId={jobId} />
+      <RepoHeader repo={repo} job={job} polling={polling} />
       <WorkspaceShell
-        left={<FileTree repoId={params.repoId} jobId={jobId} selectedPath={selectedPath} onSelectFile={setSelectedPath} />}
+        left={<FileTree repoId={params.repoId} polling={polling} selectedPath={selectedPath} onSelectFile={setSelectedPath} />}
         center={<CodeViewer repoId={params.repoId} path={selectedPath} />}
         right={<ChatPanel repoId={params.repoId} />}
       />

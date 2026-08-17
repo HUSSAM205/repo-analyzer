@@ -1,11 +1,13 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { useJobPolling } from "./use-job-polling";
-import type { Repo } from "@/lib/types";
+import type { Job, Repo } from "@/lib/types";
 
-export function RepoHeader({ repo, jobId }: { repo: Repo; jobId?: string }) {
-  const { job, polling } = useJobPolling(jobId);
+// `job`/`polling` come from a single `useJobPolling` call owned by the
+// parent page and shared with `FileTree`, rather than this component
+// running its own independent poll of the same `GET /api/jobs/{id}` --
+// see page.tsx.
+export function RepoHeader({ repo, job, polling }: { repo: Repo; job: Job | null; polling: boolean }) {
   const status = job?.status ?? repo.status;
 
   return (
