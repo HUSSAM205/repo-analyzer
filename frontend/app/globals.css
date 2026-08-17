@@ -4,21 +4,21 @@
 
 @layer base {
   :root {
-    --background: 240 10% 6%;
-    --foreground: 210 20% 92%;
-    --card: 240 8% 9%;
-    --card-foreground: 210 20% 92%;
-    --border: 240 6% 20%;
-    --input: 240 6% 20%;
+    --background: 240 10% 3.9%;   /* zinc-950 */
+    --foreground: 240 4.8% 95.9%; /* zinc-100 */
+    --card: 240 5.9% 10%;         /* zinc-900 */
+    --card-foreground: 240 4.8% 95.9%;
+    --border: 240 3.7% 15.9%;     /* zinc-800 */
+    --input: 240 3.7% 15.9%;
     --ring: 217 91% 60%;
     --primary: 217 91% 60%;
     --primary-foreground: 210 20% 98%;
-    --secondary: 240 6% 14%;
-    --secondary-foreground: 210 20% 92%;
-    --muted: 240 6% 14%;
-    --muted-foreground: 240 5% 60%;
-    --accent: 240 6% 16%;
-    --accent-foreground: 210 20% 92%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 240 4.8% 95.9%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%; /* zinc-400 */
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 240 4.8% 95.9%;
     --destructive: 0 72% 51%;
     --destructive-foreground: 210 20% 98%;
     --radius: 0.5rem;
@@ -42,6 +42,9 @@
   .scrollbar-thin {
     scrollbar-width: thin;
     scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .elevated-ring {
+    @apply ring-1 ring-zinc-700/50 shadow-sm;
   }
 }
 
