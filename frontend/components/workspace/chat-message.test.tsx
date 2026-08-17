@@ -17,4 +17,12 @@ describe("ChatMessage", () => {
     await userEvent.click(copyButton);
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith("def main():\n    pass");
   });
+
+  it("renders a copy button for a fenced code block with no language tag", async () => {
+    render(<ChatMessage role="assistant" content={"Output:\n\n```\n$ npm test\nOK\n```"} />);
+    expect(screen.getByText(/Output:/)).toBeInTheDocument();
+    const copyButton = screen.getByLabelText("Copy code");
+    await userEvent.click(copyButton);
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("$ npm test\nOK");
+  });
 });
