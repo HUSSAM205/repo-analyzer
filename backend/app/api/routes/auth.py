@@ -33,6 +33,17 @@ async def register(payload: UserCreate, db: Annotated[AsyncSession, Depends(get_
     return user
 
 
+@router.post("/guest", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def create_guest(db: Annotated[AsyncSession, Depends(get_db)]) -> TokenResponse:
+    user = User(is_guest=True, email=None, hashed_password=None)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    token = create_access_token(subject=str(user.id))
+    return TokenResponse(access_token=token)
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: UserLogin, db: Annotated[AsyncSession, Depends(get_db)]) -> TokenResponse:
     result = await db.execute(select(User).where(User.email == payload.email))

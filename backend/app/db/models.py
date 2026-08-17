@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Computed, DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Computed, DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -42,8 +42,9 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
-    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True, index=True)
+    hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_guest: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="user", cascade="all, delete-orphan")
