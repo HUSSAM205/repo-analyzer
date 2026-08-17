@@ -6,6 +6,7 @@ import { RepoHeader } from "@/components/workspace/repo-header";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { FileTree } from "@/components/workspace/file-tree";
 import { CodeViewer } from "@/components/workspace/code-viewer";
+import { ChatPanel } from "@/components/workspace/chat-panel";
 import { apiFetch } from "@/lib/api-client";
 import type { Repo } from "@/lib/types";
 
@@ -56,7 +57,7 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
       <WorkspaceShell
         left={<FileTree repoId={params.repoId} selectedPath={selectedPath} onSelectFile={setSelectedPath} />}
         center={<CodeViewer repoId={params.repoId} path={selectedPath} />}
-        right={<div className="p-4 text-sm text-muted-foreground">Chat (Tasks 8-9)</div>}
+        right={<ChatPanel repoId={params.repoId} />}
       />
     </>
   );

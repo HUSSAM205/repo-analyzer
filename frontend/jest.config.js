@@ -13,11 +13,16 @@ const customJestConfig = {
 // "node_modules" ignore pattern alongside whatever we pass in, and
 // transformIgnorePatterns entries are OR'd — so appending a negated
 // pattern via customJestConfig has no effect. shiki (and its @shikijs/*
-// deps) ship ESM-only builds with no CJS entry point, so they must be
-// run through the SWC transform instead of being left as raw node_modules.
+// deps), react-markdown, remark-gfm, and their whole unified/mdast/hast/
+// micromark/vfile dependency tree ship ESM-only builds with no CJS entry
+// point, so they must be run through the SWC transform instead of being
+// left as raw node_modules.
 // We override the merged patterns after the fact so only ours applies.
+const ESM_PACKAGES =
+  "shiki|@shikijs|react-markdown|remark-.*|rehype-.*|mdast-.*|micromark.*|unist-util-.*|unified|vfile.*|hast-util-.*|hast-.*|bail|trough|is-plain-obj|is-alphabetical|is-alphanumerical|is-decimal|is-hexadecimal|zwitch|ccount|longest-streak|markdown-table|property-information|space-separated-tokens|comma-separated-tokens|trim-lines|decode-named-character-reference|character-entities.*|character-reference-invalid|parse-entities|stringify-entities|html-url-attributes|estree-util-is-identifier-name|devlop|escape-string-regexp|@ungap/structured-clone";
+
 module.exports = async () => {
   const config = await createJestConfig(customJestConfig)();
-  config.transformIgnorePatterns = ["/node_modules/(?!(shiki|@shikijs)/)"];
+  config.transformIgnorePatterns = [`/node_modules/(?!(${ESM_PACKAGES})/)`];
   return config;
 };

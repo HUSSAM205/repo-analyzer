@@ -52,3 +52,17 @@ export interface FileContentResponse {
   path: string;
   content: string;
 }
+
+export interface Conversation {
+  id: string;
+  repo_id: string;
+  title: string;
+  created_at: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+}
