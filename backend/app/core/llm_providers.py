@@ -3,6 +3,8 @@ import logging
 from collections.abc import AsyncIterator
 
 from anthropic import AsyncAnthropic
+from google import genai
+from google.genai import types as genai_types
 from openai import AsyncOpenAI
 
 from app.config import get_settings
@@ -162,6 +164,82 @@ class OpenAIClient:
             yield LLMEvent(type="error", error=_PROVIDER_ERROR_MESSAGE)
 
 
+def _to_gemini_contents(messages: list[Message]) -> list[genai_types.Content]:
+    # Gemini's function-calling protocol has no call id -- a function_response
+    # is matched to its function_call by NAME. Build a lookup from every
+    # ToolCall's id (our own bookkeeping identifier, meaningless to Gemini)
+    # to its name, so a "tool" role message (which only carries a
+    # tool_call_id) can be translated correctly.
+    call_id_to_name: dict[str, str] = {tc.id: tc.name for msg in messages for tc in msg.tool_calls}
+
+    result: list[genai_types.Content] = []
+    for msg in messages:
+        if msg.role == "user":
+            result.append(genai_types.Content(role="user", parts=[genai_types.Part.from_text(text=msg.content)]))
+        elif msg.role == "assistant":
+            parts: list[genai_types.Part] = []
+            if msg.content:
+                parts.append(genai_types.Part.from_text(text=msg.content))
+            for tc in msg.tool_calls:
+                parts.append(genai_types.Part.from_function_call(name=tc.name, args=tc.arguments))
+            result.append(genai_types.Content(role="model", parts=parts))
+        elif msg.role == "tool":
+            name = call_id_to_name.get(msg.tool_call_id or "", "")
+            result.append(genai_types.Content(
+                role="tool",
+                parts=[genai_types.Part.from_function_response(name=name, response={"result": msg.content})],
+            ))
+    return result
+
+
+class GeminiClient:
+    def __init__(self, api_key: str, model: str):
+        self._client = genai.Client(api_key=api_key)
+        self._model = model
+
+    async def stream_chat(
+        self, messages: list[Message], tools: list[ToolSpec], system_prompt: str
+    ) -> AsyncIterator[LLMEvent]:
+        gemini_tools = [
+            genai_types.Tool(function_declarations=[
+                genai_types.FunctionDeclaration(
+                    name=t.name, description=t.description, parameters_json_schema=t.parameters
+                )
+                for t in tools
+            ])
+        ] if tools else []
+        config = genai_types.GenerateContentConfig(system_instruction=system_prompt, tools=gemini_tools)
+
+        try:
+            content_parts: list[str] = []
+            tool_calls: list[ToolCall] = []
+            call_counter = 0
+
+            stream = await self._client.aio.models.generate_content_stream(
+                model=self._model,
+                contents=_to_gemini_contents(messages),
+                config=config,
+            )
+            async for chunk in stream:
+                if chunk.text:
+                    content_parts.append(chunk.text)
+                    yield LLMEvent(type="token", token=chunk.text)
+                if chunk.function_calls:
+                    for fc in chunk.function_calls:
+                        call_counter += 1
+                        tool_calls.append(
+                            ToolCall(id=f"call_{call_counter}", name=fc.name, arguments=dict(fc.args or {}))
+                        )
+
+            if tool_calls:
+                yield LLMEvent(type="tool_call", tool_calls=tool_calls)
+            else:
+                yield LLMEvent(type="message_done", message=Message(role="assistant", content="".join(content_parts)))
+        except Exception:
+            logger.exception("GeminiClient.stream_chat failed (model=%s)", self._model)
+            yield LLMEvent(type="error", error=_PROVIDER_ERROR_MESSAGE)
+
+
 def get_llm_client():
     current_settings = get_settings()
     if current_settings.llm_provider == "fake":
@@ -180,6 +258,10 @@ def get_llm_client():
         if not current_settings.openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is not configured but LLM_PROVIDER=openai")
         return OpenAIClient(api_key=current_settings.openai_api_key, model=current_settings.openai_model)
+    if current_settings.llm_provider == "gemini":
+        if not current_settings.gemini_api_key:
+            raise RuntimeError("GEMINI_API_KEY is not configured but LLM_PROVIDER=gemini")
+        return GeminiClient(api_key=current_settings.gemini_api_key, model=current_settings.gemini_model)
     if not current_settings.anthropic_api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured but LLM_PROVIDER=anthropic")
     return AnthropicClient(api_key=current_settings.anthropic_api_key, model=current_settings.anthropic_model)
