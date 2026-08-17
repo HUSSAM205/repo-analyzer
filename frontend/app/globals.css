@@ -44,3 +44,24 @@
     scrollbar-color: hsl(var(--border)) transparent;
   }
 }
+
+/*
+ * Line numbers for Shiki-highlighted code blocks.
+ * Shiki's codeToHtml() wraps every source line in <span class="line">...</span>
+ * inside <code> (verified against the pinned shiki@1.16.2 output). We use a CSS
+ * counter on those wrapper spans rather than a custom Shiki transformer.
+ */
+.shiki-line-numbers code {
+  counter-reset: line;
+  display: grid;
+}
+.shiki-line-numbers code .line::before {
+  counter-increment: line;
+  content: counter(line);
+  display: inline-block;
+  width: 2.25rem;
+  margin-right: 1rem;
+  text-align: right;
+  color: hsl(var(--muted-foreground));
+  user-select: none;
+}

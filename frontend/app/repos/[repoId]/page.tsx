@@ -1,38 +1,41 @@
-import { notFound } from "next/navigation";
-import { backendUrl } from "@/lib/backend";
-import { getSessionToken } from "@/lib/session";
+"use client";
+
+import { useEffect, useState } from "react";
+import { notFound, useSearchParams } from "next/navigation";
 import { RepoHeader } from "@/components/workspace/repo-header";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
+import { FileTree } from "@/components/workspace/file-tree";
+import { CodeViewer } from "@/components/workspace/code-viewer";
+import { apiFetch } from "@/lib/api-client";
 import type { Repo } from "@/lib/types";
 
-async function fetchRepo(repoId: string): Promise<Repo | null> {
-  const token = getSessionToken();
-  if (!token) return null;
-  const res = await fetch(backendUrl("/api/v1/repos"), {
-    headers: { Authorization: `Bearer ${token}` },
-    cache: "no-store",
-  });
-  if (!res.ok) return null;
-  const repos = (await res.json()) as Repo[];
-  return repos.find((r) => r.id === repoId) ?? null;
-}
+export default function RepoWorkspacePage({ params }: { params: { repoId: string } }) {
+  const searchParams = useSearchParams();
+  const jobId = searchParams.get("job") ?? undefined;
 
-export default async function RepoWorkspacePage({
-  params,
-  searchParams,
-}: {
-  params: { repoId: string };
-  searchParams: { job?: string };
-}) {
-  const repo = await fetchRepo(params.repoId);
-  if (!repo) notFound();
+  const [repo, setRepo] = useState<Repo | null | undefined>(undefined);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiFetch("/api/repos", { cache: "no-store" })
+      .then((res) => (res.ok ? (res.json() as Promise<Repo[]>) : []))
+      .then((repos) => setRepo(repos.find((r) => r.id === params.repoId) ?? null));
+  }, [params.repoId]);
+
+  if (repo === null) {
+    notFound();
+  }
+
+  if (repo === undefined) {
+    return <div className="p-8 text-sm text-muted-foreground">Loading...</div>;
+  }
 
   return (
     <>
-      <RepoHeader repo={repo} jobId={searchParams.job} />
+      <RepoHeader repo={repo} jobId={jobId} />
       <WorkspaceShell
-        left={<div className="p-4 text-sm text-muted-foreground">File tree (Task 6)</div>}
-        center={<div className="p-4 text-sm text-muted-foreground">Code viewer (Task 7)</div>}
+        left={<FileTree repoId={params.repoId} selectedPath={selectedPath} onSelectFile={setSelectedPath} />}
+        center={<CodeViewer repoId={params.repoId} path={selectedPath} />}
         right={<div className="p-4 text-sm text-muted-foreground">Chat (Tasks 8-9)</div>}
       />
     </>

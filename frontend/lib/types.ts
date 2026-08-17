@@ -47,3 +47,8 @@ export interface FileTreeEntry {
 export interface FileTreeResponse {
   entries: FileTreeEntry[];
 }
+
+export interface FileContentResponse {
+  path: string;
+  content: string;
+}
