@@ -6,6 +6,7 @@ __pycache__/
 venv/
 backend/keys/*.pem
 backend/.env
+.env
 .coverage
 htmlcov/
 *.egg-info/

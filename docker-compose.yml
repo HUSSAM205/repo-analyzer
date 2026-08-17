@@ -38,6 +38,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       JWT_PRIVATE_KEY_PATH: keys/jwt_private.pem
       JWT_PUBLIC_KEY_PATH: keys/jwt_public.pem
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
     ports:
       - "8000:8000"
     volumes:
@@ -57,12 +62,29 @@ services:
       REDIS_URL: redis://redis:6379/0
       JWT_PRIVATE_KEY_PATH: keys/jwt_private.pem
       JWT_PUBLIC_KEY_PATH: keys/jwt_public.pem
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     command: ["arq", "app.workers.settings.WorkerSettings"]
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: repo-analyzer-frontend
+    environment:
+      BACKEND_URL: http://api:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_started
 
 volumes:
   postgres_data:
