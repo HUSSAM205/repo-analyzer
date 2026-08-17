@@ -65,3 +65,12 @@
   color: hsl(var(--muted-foreground));
   user-select: none;
 }
+/*
+ * Shiki does not trim the source file's trailing newline, so codeToHtml()
+ * always emits one extra empty <span class="line"></span> after the last
+ * real line of content. Hide it so the viewer doesn't show a phantom
+ * numbered blank line at the bottom of every file.
+ */
+.shiki-line-numbers code .line:last-child:empty {
+  display: none;
+}

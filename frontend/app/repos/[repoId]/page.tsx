@@ -14,13 +14,33 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
   const jobId = searchParams.get("job") ?? undefined;
 
   const [repo, setRepo] = useState<Repo | null | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+    setError(null);
+
     apiFetch("/api/repos", { cache: "no-store" })
-      .then((res) => (res.ok ? (res.json() as Promise<Repo[]>) : []))
-      .then((repos) => setRepo(repos.find((r) => r.id === params.repoId) ?? null));
+      .then((res) => {
+        if (!res.ok) throw new Error("Failed to load repositories");
+        return res.json() as Promise<Repo[]>;
+      })
+      .then((repos) => {
+        if (!cancelled) setRepo(repos.find((r) => r.id === params.repoId) ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Could not load this repository.");
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [params.repoId]);
+
+  if (error) {
+    return <div className="p-8 text-sm text-destructive">{error}</div>;
+  }
 
   if (repo === null) {
     notFound();
