@@ -85,7 +85,7 @@ class Repo(Base):
     files: Mapped[list["File"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
 
-    __table_args__ = (UniqueConstraint("user_id", "url", name="uq_repo_user_url"),)
+    __table_args__ = (UniqueConstraint("url", name="uq_repo_url"),)
 
 
 class Job(Base):

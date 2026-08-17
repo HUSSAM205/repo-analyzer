@@ -22,8 +22,20 @@ async def analyze_repo_endpoint(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RepoAnalyzeResponse:
     url_str = str(payload.repo_url)
-    existing = await db.execute(select(Repo).where(Repo.user_id == current_user.id, Repo.url == url_str))
+    existing = await db.execute(select(Repo).where(Repo.url == url_str))
     repo = existing.scalar_one_or_none()
+
+    if repo is not None and repo.status != RepoStatus.FAILED:
+        # Someone already analyzed this URL (or is currently analyzing it) --
+        # converge onto that repo's existing analysis instead of paying the
+        # clone/chunk/embed/LLM cost again. Find its most recent job rather
+        # than enqueueing a new one.
+        latest_job = await db.execute(
+            select(Job).where(Job.repo_id == repo.id).order_by(Job.created_at.desc()).limit(1)
+        )
+        job = latest_job.scalar_one()
+        return RepoAnalyzeResponse(repo_id=repo.id, job_id=job.id)
+
     if repo is None:
         repo = Repo(
             user_id=current_user.id,
@@ -33,6 +45,8 @@ async def analyze_repo_endpoint(
         )
         db.add(repo)
         await db.flush()
+    # else: repo exists and is FAILED -- fall through to re-analyze it below,
+    # exactly as the pre-existing re-analysis path already did.
 
     job = Job(repo_id=repo.id)
     db.add(job)
