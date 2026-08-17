@@ -76,6 +76,7 @@ token to match the resource's creator:
 
 | Endpoint | Today | After |
 |---|---|---|
+| `GET /repos/{repo_id}` (new — see below) | doesn't exist | repo existence only, `RepoResponse` |
 | `GET /repos/{id}/files`, `.../files/content` | `get_owned_repo` (404 on mismatch) | repo existence only (404 if repo doesn't exist, no ownership check) |
 | `GET /jobs/{id}` | inline `repo.user_id != current_user.id` | job existence only |
 | `GET /search` | inline `repo.user_id != current_user.id` | repo existence only |
@@ -94,6 +95,20 @@ accordingly. `current_user` stays a required dependency everywhere (a
 guest token still has to be presented — this is what keeps the chat/
 analyze rate limiter meaningful), it's just no longer compared against
 resource ownership on reads.
+
+**Gap found while designing 3B against this API**: no endpoint has ever
+existed to fetch a single repo's metadata (name, status) by id — the
+frontend's workspace page (`app/repos/[repoId]/page.tsx`) currently
+works around this by fetching the caller's own `GET /repos` *list* and
+filtering client-side for the matching id. Under public reads, that
+would silently 404 a guest opening a repo link someone else submitted
+(the exact "fully public by URL" scenario this sub-project exists to
+support), since the list stays personal by design. Add
+`GET /repos/{repo_id}` — same existence-only check as every other read
+in this table, returns the existing `RepoResponse` shape. This is a
+genuinely new endpoint (not a relaxed check on an existing one), but it
+belongs in the same task as the rest of this capability since it uses
+the exact `get_repo_or_404` helper this capability introduces.
 
 ### New capability 3: global repo dedup
 
