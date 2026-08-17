@@ -14,7 +14,7 @@ async def test_create_and_query_file(db_session):
     db_session.add(user)
     await db_session.flush()
 
-    repo = Repo(user_id=user.id, url="https://github.com/example/repo", name="repo", status=RepoStatus.READY)
+    repo = Repo(user_id=user.id, url=f"https://github.com/example/repo-{uuid.uuid4()}", name="repo", status=RepoStatus.READY)
     db_session.add(repo)
     await db_session.flush()
 
@@ -34,7 +34,7 @@ async def test_conversation_and_messages_roundtrip(db_session):
     db_session.add(user)
     await db_session.flush()
 
-    repo = Repo(user_id=user.id, url="https://github.com/example/repo2", name="repo2", status=RepoStatus.READY)
+    repo = Repo(user_id=user.id, url=f"https://github.com/example/repo2-{uuid.uuid4()}", name="repo2", status=RepoStatus.READY)
     db_session.add(repo)
     await db_session.flush()
 
@@ -59,7 +59,7 @@ async def test_files_unique_constraint_per_repo_and_path(db_session):
     db_session.add(user)
     await db_session.flush()
 
-    repo = Repo(user_id=user.id, url="https://github.com/example/repo3", name="repo3", status=RepoStatus.READY)
+    repo = Repo(user_id=user.id, url=f"https://github.com/example/repo3-{uuid.uuid4()}", name="repo3", status=RepoStatus.READY)
     db_session.add(repo)
     await db_session.flush()
 

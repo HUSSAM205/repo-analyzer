@@ -27,7 +27,7 @@ async def test_file_tree_and_content_flow():
         user_id = me_resp.json()["id"]
 
         async with async_session_maker() as db:
-            repo = Repo(user_id=user_id, url="https://github.com/example/filesrepo", name="filesrepo", status=RepoStatus.READY)
+            repo = Repo(user_id=user_id, url=f"https://github.com/example/filesrepo-{uuid.uuid4()}", name="filesrepo", status=RepoStatus.READY)
             db.add(repo)
             await db.flush()
             db.add(File(repo_id=repo.id, path="src/main.py", content="def main(): pass"))
@@ -66,7 +66,7 @@ async def test_files_endpoints_accessible_by_other_users():
         owner_id = owner_me.json()["id"]
 
         async with async_session_maker() as db:
-            repo = Repo(user_id=owner_id, url="https://github.com/example/privatefiles", name="privatefiles", status=RepoStatus.READY)
+            repo = Repo(user_id=owner_id, url=f"https://github.com/example/privatefiles-{uuid.uuid4()}", name="privatefiles", status=RepoStatus.READY)
             db.add(repo)
             await db.flush()
             db.add(File(repo_id=repo.id, path="anything.py", content="print('hi')"))

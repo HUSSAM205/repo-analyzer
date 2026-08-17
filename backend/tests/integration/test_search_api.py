@@ -24,7 +24,7 @@ async def test_search_endpoint_returns_matching_chunk():
         user_id = me_resp.json()["id"]
 
         async with async_session_maker() as db:
-            repo = Repo(user_id=user_id, url="https://github.com/example/repo2", name="repo2", status=RepoStatus.READY)
+            repo = Repo(user_id=user_id, url=f"https://github.com/example/repo2-{uuid.uuid4()}", name="repo2", status=RepoStatus.READY)
             db.add(repo)
             await db.flush()
 
@@ -56,7 +56,7 @@ async def test_search_endpoint_accessible_by_other_users():
         owner_id = owner_me.json()["id"]
 
         async with async_session_maker() as db:
-            repo = Repo(user_id=owner_id, url="https://github.com/example/private", name="private", status=RepoStatus.READY)
+            repo = Repo(user_id=owner_id, url=f"https://github.com/example/private-{uuid.uuid4()}", name="private", status=RepoStatus.READY)
             db.add(repo)
             await db.commit()
             repo_id = str(repo.id)

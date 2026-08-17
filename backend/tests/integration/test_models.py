@@ -25,7 +25,7 @@ async def test_code_chunk_vector_similarity_search(db_session):
     db_session.add(user)
     await db_session.flush()
 
-    repo = Repo(user_id=user.id, url="https://github.com/example/repo", name="repo", status=RepoStatus.READY)
+    repo = Repo(user_id=user.id, url=f"https://github.com/example/repo-{uuid.uuid4()}", name="repo", status=RepoStatus.READY)
     db_session.add(repo)
     await db_session.flush()
 
@@ -45,7 +45,10 @@ async def test_code_chunk_vector_similarity_search(db_session):
 
     query_vector = [0.1] * 768
     result = await db_session.execute(
-        select(CodeChunk).order_by(CodeChunk.embedding.cosine_distance(query_vector)).limit(1)
+        select(CodeChunk)
+        .where(CodeChunk.repo_id == repo.id)
+        .order_by(CodeChunk.embedding.cosine_distance(query_vector))
+        .limit(1)
     )
     nearest = result.scalar_one()
     assert nearest.id == chunk_close.id

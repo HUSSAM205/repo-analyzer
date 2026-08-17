@@ -32,7 +32,7 @@ async def test_create_list_conversations_and_empty_message_history():
         headers = {"Authorization": f"Bearer {token}"}
         me_resp = await client.get("/api/v1/auth/me", headers=headers)
         user_id = me_resp.json()["id"]
-        repo_id = await _create_repo_for_user(user_id, "https://github.com/example/convrepo")
+        repo_id = await _create_repo_for_user(user_id, f"https://github.com/example/convrepo-{uuid.uuid4()}")
 
         create_resp = await client.post(
             f"/api/v1/repos/{repo_id}/conversations", json={"title": "First chat"}, headers=headers
@@ -70,7 +70,7 @@ async def test_conversation_endpoints_accessible_by_other_users():
         owner_headers = {"Authorization": f"Bearer {owner_token}"}
         owner_me = await client.get("/api/v1/auth/me", headers=owner_headers)
         owner_id = owner_me.json()["id"]
-        repo_id = await _create_repo_for_user(owner_id, "https://github.com/example/privateconv")
+        repo_id = await _create_repo_for_user(owner_id, f"https://github.com/example/privateconv-{uuid.uuid4()}")
 
         create_resp = await client.post(
             f"/api/v1/repos/{repo_id}/conversations", json={"title": "Private"}, headers=owner_headers
