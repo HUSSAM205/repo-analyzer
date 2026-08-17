@@ -141,6 +141,12 @@ The backend also supports guest access via `POST /api/v1/auth/guest`, which
 provisions a temporary access token without requiring user registration — this
 capability is used by the frontend once sub-project 3B ships.
 
+**Everything on this deployment is public by design.** There is no private
+data model: any repo URL submitted, the resulting analyzed file contents, job
+error messages, and every conversation held about a repo (not just the
+current visitor's own) are all readable by anyone who has the link — not
+only the person who submitted or wrote them.
+
 ### Full stack via Docker
 
 ```bash

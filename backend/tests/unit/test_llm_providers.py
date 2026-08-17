@@ -205,9 +205,25 @@ async def test_gemini_client_captures_and_replays_thought_signature_across_turns
                     )])
                 return turn1()
 
-            async def turn2():
+            if len(call_log) == 2:
+                # The model calls a tool again on turn 2 (rather than
+                # finishing), so this test can compare a *second* ToolCall.id
+                # against turn 1's -- exercising the exact scenario the
+                # call_counter regression this test guards against would
+                # break: a stream_chat-local counter that reset to 0 on every
+                # call would reissue "call_1" here too, colliding with turn
+                # 1's id in both _thought_signatures and the tool-name lookup
+                # in _to_gemini_contents.
+                async def turn2():
+                    yield FakeChunk(parts=[FakePart(
+                        function_call=FakeFunctionCall(name="search_code", args={"query": "helper"}),
+                        thought_signature=b"sig-from-turn-2",
+                    )])
+                return turn2()
+
+            async def turn3():
                 yield FakeChunk(text="Done.")
-            return turn2()
+            return turn3()
 
     class FakeAio:
         def __init__(self):
@@ -224,26 +240,54 @@ async def test_gemini_client_captures_and_replays_thought_signature_across_turns
         )
     ]
     assert turn1_events[0].type == "tool_call"
-    tool_call = turn1_events[0].tool_calls[0]
-    assert client._thought_signatures[tool_call.id] == b"sig-from-turn-1"
+    tool_call_1 = turn1_events[0].tool_calls[0]
+    assert client._thought_signatures[tool_call_1.id] == b"sig-from-turn-1"
 
     # Turn 2: replay that tool call plus its result. The outgoing request
     # must carry the cached thought_signature on the replayed function_call
-    # part, or Gemini 3 rejects it with a 400 INVALID_ARGUMENT.
+    # part, or Gemini 3 rejects it with a 400 INVALID_ARGUMENT. The model
+    # responds with a second tool call.
     messages_turn2 = [
         Message(role="user", content="hi"),
-        Message(role="assistant", content="", tool_calls=[tool_call]),
-        Message(role="tool", content="found it", tool_call_id=tool_call.id),
+        Message(role="assistant", content="", tool_calls=[tool_call_1]),
+        Message(role="tool", content="found it", tool_call_id=tool_call_1.id),
     ]
     turn2_events = [
         event
         async for event in client.stream_chat(messages=messages_turn2, tools=[], system_prompt="sys")
     ]
-    assert turn2_events[-1].type == "message_done"
+    assert turn2_events[0].type == "tool_call"
+    tool_call_2 = turn2_events[0].tool_calls[0]
+    assert client._thought_signatures[tool_call_2.id] == b"sig-from-turn-2"
 
-    sent_contents = call_log[1]["contents"]
-    replayed_assistant_content = next(c for c in sent_contents if c.role == "model")
-    assert replayed_assistant_content.parts[0].thought_signature == b"sig-from-turn-1"
+    # The regression guard: turn 2's ToolCall.id must differ from turn 1's.
+    # If the id-generating counter were ever moved back to stream_chat-local
+    # state, both turns would independently produce "call_1" and this would
+    # fail.
+    assert tool_call_2.id != tool_call_1.id
+
+    sent_contents_turn2 = call_log[1]["contents"]
+    replayed_assistant_content_turn2 = next(c for c in sent_contents_turn2 if c.role == "model")
+    assert replayed_assistant_content_turn2.parts[0].thought_signature == b"sig-from-turn-1"
+
+    # Turn 3: replay both tool calls plus their results and let the model
+    # finish, confirming both cached signatures survive together and the
+    # conversation still completes normally.
+    messages_turn3 = [
+        *messages_turn2,
+        Message(role="assistant", content="", tool_calls=[tool_call_2]),
+        Message(role="tool", content="found it too", tool_call_id=tool_call_2.id),
+    ]
+    turn3_events = [
+        event
+        async for event in client.stream_chat(messages=messages_turn3, tools=[], system_prompt="sys")
+    ]
+    assert turn3_events[-1].type == "message_done"
+
+    sent_contents_turn3 = call_log[2]["contents"]
+    replayed_assistant_contents_turn3 = [c for c in sent_contents_turn3 if c.role == "model"]
+    assert replayed_assistant_contents_turn3[0].parts[0].thought_signature == b"sig-from-turn-1"
+    assert replayed_assistant_contents_turn3[1].parts[0].thought_signature == b"sig-from-turn-2"
 
 
 @pytest.mark.asyncio
