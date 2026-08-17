@@ -93,6 +93,52 @@ one-workspace-per-user, no load testing at scale, no Kubernetes deployment.
 See `docs/superpowers/specs/2026-08-16-analysis-core-design.md` for the full
 design and the list of future sub-projects.
 
+## Frontend (sub-project 2B)
+
+A Next.js 14 IDE-style UI: browse an analyzed repo's file tree, view
+syntax-highlighted source, and chat with the AI agent — all with
+real-time streaming, dark/glassmorphism styling, and Framer Motion
+micro-interactions.
+
+### Local development
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Requires the backend running (`docker compose up -d postgres redis`,
+then `uvicorn app.main:app --reload` from `backend/`) at
+`http://localhost:8000` (the default `BACKEND_URL`).
+
+### Testing
+
+- Component tests: `npm test` (from `frontend/`)
+- End-to-end (Playwright): requires the full stack running with
+  `LLM_PROVIDER=fake` (no real API key needed — see below) so the chat
+  step gets a deterministic scripted reply. `npx playwright test`
+  (from `frontend/`, after `npx playwright install --with-deps
+  chromium` once).
+
+### Fake LLM provider mode
+
+Set `LLM_PROVIDER=fake` (no API key required) to get a scripted chat
+response instead of a real model — useful for local development and
+the e2e suite without spending on a real API. Never use this in a
+real deployment; it's a testing/dev convenience only.
+
+### Full stack via Docker
+
+```bash
+docker compose up -d --build
+```
+Brings up Postgres, Redis, the API, the worker, and the frontend
+together. Visit `http://localhost:3000`. Copy `.env.example` to
+`.env` at the repo root first if you want real chat responses
+(`LLM_PROVIDER=anthropic` or `openai` plus the matching API key) —
+without it, chat gracefully shows a "not configured" message rather
+than failing.
+
 ## Known limitations
 
 Under the current `--workers 4` uvicorn configuration, the first request that triggers the CodeBERT model's cold load can cause a several-minute worker instability window: each of the four uvicorn worker processes independently loads the ~500MB model into memory via a process-local cache, resulting in resource contention and temporary service degradation. Recommended mitigations for production: bake the model into the Docker image at build time, warm the model in FastAPI's startup lifespan before accepting traffic, or reduce the number of workers on the embedding-serving path.
