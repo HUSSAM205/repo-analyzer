@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 # Generic, non-leaking message surfaced to SSE clients when a provider call
 # fails. The real exception (which can contain auth details, request/response
 # bodies, or other sensitive internals) is logged server-side via
-# logger.exception() instead -- see AnthropicClient.stream_chat and
-# OpenAIClient.stream_chat below.
+# logger.exception() instead -- see AnthropicClient.stream_chat,
+# OpenAIClient.stream_chat, and GeminiClient.stream_chat below.
 _PROVIDER_ERROR_MESSAGE = "The AI provider is currently unavailable. Please try again."
 
 
@@ -164,7 +164,9 @@ class OpenAIClient:
             yield LLMEvent(type="error", error=_PROVIDER_ERROR_MESSAGE)
 
 
-def _to_gemini_contents(messages: list[Message]) -> list[genai_types.Content]:
+def _to_gemini_contents(
+    messages: list[Message], thought_signatures: dict[str, bytes] | None = None
+) -> list[genai_types.Content]:
     # Gemini's function-calling protocol has no call id -- a function_response
     # is matched to its function_call by NAME. Build a lookup from every
     # ToolCall's id (our own bookkeeping identifier, meaningless to Gemini)
@@ -181,21 +183,63 @@ def _to_gemini_contents(messages: list[Message]) -> list[genai_types.Content]:
             if msg.content:
                 parts.append(genai_types.Part.from_text(text=msg.content))
             for tc in msg.tool_calls:
-                parts.append(genai_types.Part.from_function_call(name=tc.name, args=tc.arguments))
+                part = genai_types.Part.from_function_call(name=tc.name, args=tc.arguments)
+                # Gemini 3's function-calling protocol requires echoing back an
+                # opaque `thought_signature` alongside a replayed function_call
+                # Part -- omitting it is a hard 400 INVALID_ARGUMENT on the very
+                # next turn, not just a quality nit (see GeminiClient below for
+                # where this is captured). `Part.from_function_call` has no
+                # constructor arg for it, but Part is a plain mutable object.
+                signature = (thought_signatures or {}).get(tc.id)
+                if signature:
+                    part.thought_signature = signature
+                parts.append(part)
             result.append(genai_types.Content(role="model", parts=parts))
         elif msg.role == "tool":
+            # Gemini's Content.role only accepts "user" or "model" -- there is
+            # no "tool" role. A function_response Part is sent back as a
+            # "user"-role Content, exactly like _to_anthropic_messages does
+            # for Anthropic's tool_result blocks above.
             name = call_id_to_name.get(msg.tool_call_id or "", "")
             result.append(genai_types.Content(
-                role="tool",
+                role="user",
                 parts=[genai_types.Part.from_function_response(name=name, response={"result": msg.content})],
             ))
     return result
+
+
+def _gemini_response_parts(chunk) -> list:
+    # `chunk.function_calls` (the SDK's own convenience property) extracts
+    # only `FunctionCall` objects and silently drops the sibling
+    # `thought_signature` carried on the same `Part` -- so tool-calling turns
+    # are read from the raw parts here instead, wherever available. Test
+    # doubles that only fake `.text`/`.function_calls` (no `.candidates`)
+    # simply yield no parts, which is fine: they never exercise tool calls.
+    candidates = getattr(chunk, "candidates", None)
+    if not candidates:
+        return []
+    content = getattr(candidates[0], "content", None)
+    parts = getattr(content, "parts", None) if content is not None else None
+    return list(parts) if parts else []
 
 
 class GeminiClient:
     def __init__(self, api_key: str, model: str):
         self._client = genai.Client(api_key=api_key)
         self._model = model
+        # Cache of ToolCall.id -> thought_signature, and the counter that
+        # generates those ids. Both live on the instance (not as
+        # stream_chat-local state) because a `thought_signature` returned on
+        # one turn must be echoed back on a later turn of the *same*
+        # conversation, and app/core/agent.py's tool loop (_build_graph)
+        # reuses one llm_client across every turn of one agent run. A
+        # per-call-local counter would reissue "call_1" on every turn and
+        # silently collide across turns in both this cache and
+        # _to_gemini_contents' call_id_to_name lookup; keeping it here
+        # instead guarantees ids -- and therefore cached signatures -- stay
+        # unique for the life of this client.
+        self._thought_signatures: dict[str, bytes] = {}
+        self._call_counter = 0
 
     async def stream_chat(
         self, messages: list[Message], tools: list[ToolSpec], system_prompt: str
@@ -213,23 +257,26 @@ class GeminiClient:
         try:
             content_parts: list[str] = []
             tool_calls: list[ToolCall] = []
-            call_counter = 0
 
             stream = await self._client.aio.models.generate_content_stream(
                 model=self._model,
-                contents=_to_gemini_contents(messages),
+                contents=_to_gemini_contents(messages, self._thought_signatures),
                 config=config,
             )
             async for chunk in stream:
                 if chunk.text:
                     content_parts.append(chunk.text)
                     yield LLMEvent(type="token", token=chunk.text)
-                if chunk.function_calls:
-                    for fc in chunk.function_calls:
-                        call_counter += 1
-                        tool_calls.append(
-                            ToolCall(id=f"call_{call_counter}", name=fc.name, arguments=dict(fc.args or {}))
-                        )
+                for part in _gemini_response_parts(chunk):
+                    fc = getattr(part, "function_call", None)
+                    if fc is None:
+                        continue
+                    self._call_counter += 1
+                    call_id = f"call_{self._call_counter}"
+                    tool_calls.append(ToolCall(id=call_id, name=fc.name, arguments=dict(fc.args or {})))
+                    signature = getattr(part, "thought_signature", None)
+                    if signature:
+                        self._thought_signatures[call_id] = signature
 
             if tool_calls:
                 yield LLMEvent(type="tool_call", tool_calls=tool_calls)

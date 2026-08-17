@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -96,8 +97,27 @@ def test_to_gemini_contents_converts_tool_call_and_result_matched_by_name():
     result = _to_gemini_contents(messages)
     assert result[0].role == "model"
     assert result[0].parts[0].function_call.name == "search_code"
-    assert result[1].role == "tool"
+    # Gemini's Content.role only accepts "user"/"model" -- a function_response
+    # is sent back as role="user", not a "tool" role (which doesn't exist).
+    assert result[1].role == "user"
     assert result[1].parts[0].function_response.name == "search_code"
+
+
+def test_to_gemini_contents_attaches_thought_signature_to_replayed_function_call():
+    from app.core.llm_providers import _to_gemini_contents
+
+    tool_call = ToolCall(id="call_1", name="search_code", arguments={"query": "main"})
+    messages = [Message(role="assistant", content="", tool_calls=[tool_call])]
+
+    # Without a cached signature, the replayed function_call part carries none.
+    result_without = _to_gemini_contents(messages)
+    assert result_without[0].parts[0].thought_signature is None
+
+    # Gemini 3 requires echoing back the opaque thought_signature it issued
+    # alongside the original function_call on any later turn that replays it,
+    # or the API rejects the request with a 400 -- see GeminiClient.stream_chat.
+    result_with = _to_gemini_contents(messages, thought_signatures={"call_1": b"opaque-signature-bytes"})
+    assert result_with[0].parts[0].thought_signature == b"opaque-signature-bytes"
 
 
 @pytest.mark.asyncio
@@ -123,10 +143,12 @@ async def test_gemini_client_streams_tokens_and_completes(monkeypatch):
 
     client = GeminiClient(api_key="test-key", model="test-model")
     # google-genai 2.18.1's Client.aio is a read-only property (no setter),
-    # so it can't be assigned on the instance like a plain attribute. Swap
-    # the class-level descriptor for the duration of this test instead;
-    # monkeypatch restores the real property afterward.
-    monkeypatch.setattr(type(client._client), "aio", property(lambda self: FakeAio()))
+    # so it can't be assigned on the instance like a plain attribute
+    # (`client._client.aio = ...` raises AttributeError). GeminiClient.
+    # stream_chat only ever touches `self._client.aio`, so swap out the
+    # whole `_client` for a minimal stand-in instead of the real
+    # genai.Client -- narrower than patching the shared Client class.
+    monkeypatch.setattr(client, "_client", SimpleNamespace(aio=FakeAio()))
 
     events = [
         event
@@ -137,6 +159,91 @@ async def test_gemini_client_streams_tokens_and_completes(monkeypatch):
 
     assert [e.type for e in events] == ["token", "token", "message_done"]
     assert events[-1].message.content == "It's the entry point."
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_captures_and_replays_thought_signature_across_turns(monkeypatch):
+    from app.core.llm_providers import GeminiClient
+
+    # Shapes mirroring the real google-genai response structure closely
+    # enough to exercise _gemini_response_parts (chunk.candidates[0].content
+    # .parts), since chunk.function_calls (the SDK's convenience property)
+    # discards the sibling thought_signature and can't be used to test this.
+    class FakeFunctionCall:
+        def __init__(self, name, args):
+            self.name = name
+            self.args = args
+
+    class FakePart:
+        def __init__(self, function_call=None, thought_signature=None):
+            self.function_call = function_call
+            self.thought_signature = thought_signature
+
+    class FakeContent:
+        def __init__(self, parts):
+            self.parts = parts
+
+    class FakeCandidate:
+        def __init__(self, parts):
+            self.content = FakeContent(parts)
+
+    class FakeChunk:
+        def __init__(self, text=None, parts=None):
+            self.text = text
+            self.candidates = [FakeCandidate(parts)] if parts is not None else []
+
+    call_log: list[dict] = []
+
+    class FakeModels:
+        async def generate_content_stream(self, **kwargs):
+            call_log.append(kwargs)
+            if len(call_log) == 1:
+                async def turn1():
+                    yield FakeChunk(parts=[FakePart(
+                        function_call=FakeFunctionCall(name="search_code", args={"query": "main"}),
+                        thought_signature=b"sig-from-turn-1",
+                    )])
+                return turn1()
+
+            async def turn2():
+                yield FakeChunk(text="Done.")
+            return turn2()
+
+    class FakeAio:
+        def __init__(self):
+            self.models = FakeModels()
+
+    client = GeminiClient(api_key="test-key", model="test-model")
+    monkeypatch.setattr(client, "_client", SimpleNamespace(aio=FakeAio()))
+
+    # Turn 1: the model emits a tool call carrying a thought_signature.
+    turn1_events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+    assert turn1_events[0].type == "tool_call"
+    tool_call = turn1_events[0].tool_calls[0]
+    assert client._thought_signatures[tool_call.id] == b"sig-from-turn-1"
+
+    # Turn 2: replay that tool call plus its result. The outgoing request
+    # must carry the cached thought_signature on the replayed function_call
+    # part, or Gemini 3 rejects it with a 400 INVALID_ARGUMENT.
+    messages_turn2 = [
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="", tool_calls=[tool_call]),
+        Message(role="tool", content="found it", tool_call_id=tool_call.id),
+    ]
+    turn2_events = [
+        event
+        async for event in client.stream_chat(messages=messages_turn2, tools=[], system_prompt="sys")
+    ]
+    assert turn2_events[-1].type == "message_done"
+
+    sent_contents = call_log[1]["contents"]
+    replayed_assistant_content = next(c for c in sent_contents if c.role == "model")
+    assert replayed_assistant_content.parts[0].thought_signature == b"sig-from-turn-1"
 
 
 @pytest.mark.asyncio
@@ -154,7 +261,7 @@ async def test_gemini_client_sanitizes_provider_exception(monkeypatch):
             self.models = FakeModels()
 
     # Same read-only-property workaround as above.
-    monkeypatch.setattr(type(client._client), "aio", property(lambda self: FakeAio()))
+    monkeypatch.setattr(client, "_client", SimpleNamespace(aio=FakeAio()))
 
     events = [
         event
