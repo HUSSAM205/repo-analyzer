@@ -24,6 +24,42 @@ export function ChatPanel({ repoId }: { repoId: string }) {
 
   const scrollViewportRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Guards handleScroll against the app's own scroll-to-bottom calls. A
+  // `scrollIntoView({ behavior: "smooth" })` animates over several frames,
+  // firing native "scroll" events along the way -- and handleScroll can't
+  // tell those apart from the user grabbing the scrollbar. Without this,
+  // an in-flight auto-follow animation (or the "jump to bottom" button's own
+  // scroll) can be measured mid-flight, read as "far from bottom", and
+  // permanently kill auto-follow with no user action at all. Set to true
+  // right before every programmatic scroll and cleared a bit after the
+  // *last* one settles (see scrollToBottom below); handleScroll no-ops
+  // while it's true.
+  const programmaticScrollRef = useRef(false);
+  const clearProgrammaticScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function scrollToBottom(behavior: ScrollBehavior) {
+    programmaticScrollRef.current = true;
+    if (clearProgrammaticScrollTimeoutRef.current) {
+      clearTimeout(clearProgrammaticScrollTimeoutRef.current);
+    }
+    bottomRef.current?.scrollIntoView({ behavior });
+    // 600ms comfortably outlasts a "smooth" scrollIntoView animation over a
+    // chat-panel-sized distance in evergreen browsers. Not using the
+    // "scrollend" event because it isn't universally supported yet; a
+    // generous fixed delay, re-armed on every call, is simpler and safe
+    // here since the only cost of guarding a little too long is briefly
+    // ignoring a real user scroll during active streaming.
+    clearProgrammaticScrollTimeoutRef.current = setTimeout(() => {
+      programmaticScrollRef.current = false;
+    }, 600);
+  }
+
+  async function refetchMessages(conversationId: string) {
+    const res = await apiFetch(`/api/conversations/${conversationId}/messages`, { cache: "no-store" });
+    if (res.ok) {
+      setMessages((await res.json()) as ChatMessageType[]);
+    }
+  }
 
   useEffect(() => {
     apiFetch(`/api/repos/${repoId}/conversations`, { cache: "no-store" })
@@ -39,18 +75,19 @@ export function ChatPanel({ repoId }: { repoId: string }) {
       setMessages([]);
       return;
     }
-    apiFetch(`/api/conversations/${activeId}/messages`, { cache: "no-store" })
-      .then((res) => (res.ok ? (res.json() as Promise<ChatMessageType[]>) : []))
-      .then(setMessages);
+    refetchMessages(activeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
   useEffect(() => {
     if (autoScroll) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      scrollToBottom("smooth");
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, streamingText, autoScroll]);
 
   function handleScroll() {
+    if (programmaticScrollRef.current) return;
     const el = scrollViewportRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
@@ -115,15 +152,28 @@ export function ChatPanel({ repoId }: { repoId: string }) {
           } else if (event.type === "tool_result") {
             setStatusText(null);
           } else if (event.type === "done") {
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: (event.data as { message_id: string }).message_id,
-                role: "assistant",
-                content: finalText,
-                created_at: new Date().toISOString(),
-              },
-            ]);
+            if (finalText.trim()) {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: (event.data as { message_id: string }).message_id,
+                  role: "assistant",
+                  content: finalText,
+                  created_at: new Date().toISOString(),
+                },
+              ]);
+            } else {
+              // The agent's give-up path (max tool-call iterations with no
+              // textual answer, see backend/app/core/agent.py) emits "done"
+              // with no preceding "token" events at all -- finalText is
+              // empty here even though the backend persisted real
+              // explanatory text for this turn. The "done" payload only
+              // carries {message_id}, not the text itself, so it can't be
+              // recovered from the stream. Refetch the conversation's
+              // message list instead, which reflects whatever was actually
+              // persisted, rather than rendering a blank assistant bubble.
+              await refetchMessages(activeId);
+            }
             setStreamingText("");
             setStatusText(null);
           } else if (event.type === "error") {
@@ -185,7 +235,7 @@ export function ChatPanel({ repoId }: { repoId: string }) {
             variant="outline"
             onClick={() => {
               setAutoScroll(true);
-              bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+              scrollToBottom("smooth");
             }}
             className="absolute bottom-3 left-1/2 -translate-x-1/2"
           >
