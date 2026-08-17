@@ -62,7 +62,7 @@ event rather than crashing, but won't produce real answers.
    LLM_PROVIDER=anthropic
    ANTHROPIC_API_KEY=sk-ant-...
    ```
-   (or `LLM_PROVIDER=openai` with `OPENAI_API_KEY=...`)
+   (or `LLM_PROVIDER=openai` with `OPENAI_API_KEY=...`, or `LLM_PROVIDER=gemini` with `GEMINI_API_KEY=...`)
 2. Restart the API (and worker, if running) so the new env vars are picked up.
 3. Browse the file tree: `curl http://localhost:8000/api/v1/repos/<repo_id>/files -H "Authorization: Bearer <token>"`
 4. Start a conversation:
@@ -135,6 +135,12 @@ response instead of a real model — useful for local development and
 the e2e suite without spending on a real API. Never use this in a
 real deployment; it's a testing/dev convenience only.
 
+### Guest access (sub-project 3B)
+
+The backend also supports guest access via `POST /api/v1/auth/guest`, which
+provisions a temporary access token without requiring user registration — this
+capability is used by the frontend once sub-project 3B ships.
+
 ### Full stack via Docker
 
 ```bash
@@ -143,7 +149,7 @@ docker compose up -d --build
 Brings up Postgres, Redis, the API, the worker, and the frontend
 together. Visit `http://localhost:3000`. Copy `.env.example` to
 `.env` at the repo root first if you want real chat responses
-(`LLM_PROVIDER=anthropic` or `openai` plus the matching API key) —
+(`LLM_PROVIDER=anthropic`, `openai`, or `gemini` plus the matching API key) —
 without it, chat gracefully shows a "not configured" message rather
 than failing.
 
