@@ -8,12 +8,17 @@ import type { Repo } from "@/lib/types";
 
 async function fetchRepos(): Promise<Repo[]> {
   const token = getSessionToken();
-  if (!token) redirect("/login");
+  // No /login to send anyone to anymore. A missing/invalid token here
+  // means the middleware's guest-mint attempt itself failed (backend
+  // unreachable) -- redirect to "/" so middleware gets another chance
+  // on the next request, rather than rendering a broken authenticated
+  // page or a 404 for a route that no longer exists.
+  if (!token) redirect("/");
   const res = await fetch(backendUrl("/api/v1/repos"), {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
   });
-  if (res.status === 401) redirect("/login");
+  if (res.status === 401) redirect("/");
   if (!res.ok) return [];
   return res.json();
 }
