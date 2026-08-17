@@ -6,7 +6,7 @@ from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from app.config import get_settings
-from app.core.llm import LLMEvent, Message, ToolCall, ToolSpec
+from app.core.llm import FakeLLMClient, LLMEvent, Message, ScriptedTurn, ToolCall, ToolSpec
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -164,6 +164,18 @@ class OpenAIClient:
 
 def get_llm_client():
     current_settings = get_settings()
+    if current_settings.llm_provider == "fake":
+        return FakeLLMClient(
+            turns=[
+                ScriptedTurn(
+                    text=(
+                        "This is a response from the fake LLM provider, used for local development "
+                        "and end-to-end testing without a real API key. I can see this repository's "
+                        "code via the search_code tool, but this specific reply is scripted."
+                    )
+                )
+            ]
+        )
     if current_settings.llm_provider == "openai":
         if not current_settings.openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is not configured but LLM_PROVIDER=openai")

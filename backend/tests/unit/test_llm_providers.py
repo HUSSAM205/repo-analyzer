@@ -71,6 +71,20 @@ async def test_anthropic_client_sanitizes_provider_exception():
     assert _SECRET_MARKER not in events[0].error
 
 
+def test_get_llm_client_returns_fake_client_when_provider_is_fake(monkeypatch):
+    from app.core.llm import FakeLLMClient
+    from app.core.llm_providers import get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    get_settings.cache_clear()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, FakeLLMClient)
+    finally:
+        get_settings.cache_clear()
+
+
 @pytest.mark.asyncio
 async def test_openai_client_sanitizes_provider_exception():
     client = OpenAIClient(api_key="test-key", model="test-model")

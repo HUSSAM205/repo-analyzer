@@ -5,7 +5,15 @@ const createJestConfig = nextJest({ dir: "./" });
 const customJestConfig = {
   setupFilesAfterEnv: ["<rootDir>/jest.setup.js"],
   testEnvironment: "jest-environment-jsdom",
-  testPathIgnorePatterns: ["<rootDir>/node_modules/", "<rootDir>/tests/e2e/"],
+  // The plain "<rootDir>/tests/e2e/" pattern silently fails to match on
+  // Windows: <rootDir> expands to a native backslash path (e.g.
+  // "C:\repo\frontend"), so concatenating it with the forward-slash suffix
+  // produces a mixed-separator string that, interpreted as a regex, never
+  // matches the actual (also-backslashed) resolved test path -- so
+  // tests/e2e/*.spec.ts files fell through to being run as Jest tests
+  // instead of being excluded for `npx playwright test`. A character class
+  // matching either separator is robust on both platforms.
+  testPathIgnorePatterns: ["<rootDir>/node_modules/", "[\\\\/]tests[\\\\/]e2e[\\\\/]"],
   modulePathIgnorePatterns: ["<rootDir>/.next/"],
 };
 

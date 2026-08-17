@@ -55,7 +55,7 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
     <>
       <RepoHeader repo={repo} jobId={jobId} />
       <WorkspaceShell
-        left={<FileTree repoId={params.repoId} selectedPath={selectedPath} onSelectFile={setSelectedPath} />}
+        left={<FileTree repoId={params.repoId} jobId={jobId} selectedPath={selectedPath} onSelectFile={setSelectedPath} />}
         center={<CodeViewer repoId={params.repoId} path={selectedPath} />}
         right={<ChatPanel repoId={params.repoId} />}
       />
