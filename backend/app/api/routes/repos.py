@@ -32,18 +32,19 @@ def _job_is_stale(job: Job) -> bool:
     return datetime.now(timezone.utc) - created_at > threshold
 
 
-async def _enqueue_or_fail_job(db: AsyncSession, job: Job) -> None:
+async def _enqueue_or_fail_job(db: AsyncSession, repo: Repo, job: Job) -> None:
     pool = await get_arq_pool()
     try:
         await pool.enqueue_job("analyze_repo", str(job.id))
     except Exception as exc:
         # The repo/job rows are already committed at this point. If enqueue
         # fails, the job must not be left silently PENDING forever -- mark it
-        # FAILED so the next submission of this URL takes the existing
-        # FAILED-repo re-analysis path instead of reusing a job that will
-        # never run.
+        # (and the repo) FAILED so the next submission of this URL takes the
+        # existing FAILED-repo re-analysis path instead of reusing a job that
+        # will never run.
         job.status = JobStatus.FAILED
         job.error_message = "Failed to enqueue analysis job"
+        repo.status = RepoStatus.FAILED
         await db.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -111,7 +112,7 @@ async def analyze_repo_endpoint(
     await db.commit()
     await db.refresh(job)
 
-    await _enqueue_or_fail_job(db, job)
+    await _enqueue_or_fail_job(db, repo, job)
 
     return RepoAnalyzeResponse(repo_id=repo.id, job_id=job.id)
 

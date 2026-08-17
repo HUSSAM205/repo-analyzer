@@ -291,9 +291,11 @@ async def test_analyze_concurrent_new_url_converges_without_500(monkeypatch):
 @pytest.mark.asyncio
 async def test_analyze_enqueue_failure_marks_job_failed(monkeypatch):
     # If pool.enqueue_job raises after the repo/job rows are committed, the
-    # job must not be left stuck PENDING forever -- it should be marked
-    # FAILED so the URL becomes eligible for the existing FAILED-repo
-    # re-analysis path on the next submission.
+    # job (and the repo) must not be left stuck PENDING forever -- both
+    # should be marked FAILED so the URL becomes eligible for the existing
+    # FAILED-repo re-analysis path on the next submission. We then actually
+    # resubmit the URL to prove the URL is recoverable, not just that the
+    # first job ended up FAILED.
     from app.api.routes import repos as repos_module
 
     class FailingPool:
@@ -313,6 +315,7 @@ async def test_analyze_enqueue_failure_marks_job_failed(monkeypatch):
         )
         assert resp.status_code == 503
 
+        first_job_id: uuid.UUID
         async with async_session_maker() as db:
             repo_result = await db.execute(select(Repo).where(Repo.url == url))
             repo = repo_result.scalar_one()
@@ -320,6 +323,30 @@ async def test_analyze_enqueue_failure_marks_job_failed(monkeypatch):
             job = job_result.scalar_one()
             assert job.status == JobStatus.FAILED
             assert job.error_message == "Failed to enqueue analysis job"
+            assert repo.status == RepoStatus.FAILED
+            first_job_id = job.id
+            repo_id = repo.id
+
+        # Restore the real (working) enqueue path and resubmit the same URL.
+        # If the repo were still stuck PENDING, the dedup check in
+        # analyze_repo_endpoint would converge onto the dead first job
+        # forever. With the repo correctly marked FAILED, this must instead
+        # fall through to the create-new-job path and actually enqueue a
+        # fresh, live job.
+        monkeypatch.undo()
+
+        resubmit_resp = await client.post(
+            "/api/v1/repos/analyze", json={"repo_url": url}, headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resubmit_resp.status_code == 202, resubmit_resp.text
+        resubmit_body = resubmit_resp.json()
+        assert resubmit_body["repo_id"] == str(repo_id)
+        assert resubmit_body["job_id"] != str(first_job_id)
+
+        async with async_session_maker() as db:
+            new_job = await db.get(Job, uuid.UUID(resubmit_body["job_id"]))
+            assert new_job is not None
+            assert new_job.status in (JobStatus.PENDING, JobStatus.RUNNING)
 
 
 @pytest.mark.asyncio
