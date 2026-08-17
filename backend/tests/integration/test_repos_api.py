@@ -1,10 +1,12 @@
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
-from app.db.models import Job, Repo, RepoStatus
+from app.config import get_settings
+from app.db.models import Job, JobStatus, Repo, RepoStatus
 from app.db.session import async_session_maker
 from app.main import app
 
@@ -209,6 +211,142 @@ async def test_analyze_failed_repo_creates_new_job():
             repo = await db.get(Repo, uuid.UUID(repo_id))
             repo.status = RepoStatus.FAILED
             await db.commit()
+
+        second_token = await _register_and_login(client)
+        second_resp = await client.post(
+            "/api/v1/repos/analyze", json={"repo_url": url}, headers={"Authorization": f"Bearer {second_token}"}
+        )
+        assert second_resp.status_code == 202
+        assert second_resp.json()["repo_id"] == repo_id
+        assert second_resp.json()["job_id"] != first_job_id  # a NEW job was created
+
+
+@pytest.mark.asyncio
+async def test_analyze_concurrent_new_url_converges_without_500(monkeypatch):
+    # Two visitors submit the exact same brand-new (never-before-seen) URL at
+    # the same time -- both pass the "no existing repo" check and race to
+    # INSERT a Repo row. Before the fix, the loser's unhandled IntegrityError
+    # (uq_repo_url) surfaced as a 500; now it should converge onto the
+    # winner's repo/job instead of crashing.
+    #
+    # A plain asyncio.gather() of two real client.post() calls exercises this
+    # too, but whether the two coroutines' DB calls actually interleave
+    # tightly enough to collide is at the mercy of asyncio's scheduler --
+    # observed to sometimes execute near-sequentially and skip the race
+    # entirely, making that version of this test flaky/non-deterministic.
+    # Instead, deterministically simulate "someone else wins the race between
+    # our SELECT and our INSERT" by hooking AsyncSession.flush: the first time
+    # this test's session tries to flush a new Repo row for `url`, a
+    # completely separate session inserts and commits a competing Repo (+Job)
+    # for that same URL first, guaranteeing the real flush that follows hits
+    # uq_repo_url every time this test runs.
+    from sqlalchemy.ext.asyncio import AsyncSession as SAAsyncSession
+
+    url = f"https://github.com/octocat/concurrent-{uuid.uuid4()}"
+    injected = {"done": False}
+    original_flush = SAAsyncSession.flush
+
+    async def flush_with_injected_race(self, *args, **kwargs):
+        if not injected["done"]:
+            pending_repo = next(
+                (obj for obj in self.new if isinstance(obj, Repo) and obj.url == url), None
+            )
+            if pending_repo is not None:
+                injected["done"] = True
+                async with async_session_maker() as other_db:
+                    winner_repo = Repo(
+                        user_id=pending_repo.user_id, url=url, name="race-winner", status=RepoStatus.PENDING
+                    )
+                    other_db.add(winner_repo)
+                    await other_db.flush()
+                    other_db.add(Job(repo_id=winner_repo.id))
+                    await other_db.commit()
+        return await original_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(SAAsyncSession, "flush", flush_with_injected_race)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _register_and_login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        resp = await client.post("/api/v1/repos/analyze", json={"repo_url": url}, headers=headers)
+        assert resp.status_code == 202, resp.text
+        body = resp.json()
+
+        async with async_session_maker() as db:
+            repo_count = await db.execute(select(func.count()).select_from(Repo).where(Repo.url == url))
+            assert repo_count.scalar_one() == 1
+
+            winner = await db.execute(select(Repo).where(Repo.url == url))
+            winner_repo = winner.scalar_one()
+            assert winner_repo.name == "race-winner"
+            assert body["repo_id"] == str(winner_repo.id)
+
+            job_count = await db.execute(
+                select(func.count()).select_from(Job).where(Job.repo_id == winner_repo.id)
+            )
+            assert job_count.scalar_one() == 1
+
+
+@pytest.mark.asyncio
+async def test_analyze_enqueue_failure_marks_job_failed(monkeypatch):
+    # If pool.enqueue_job raises after the repo/job rows are committed, the
+    # job must not be left stuck PENDING forever -- it should be marked
+    # FAILED so the URL becomes eligible for the existing FAILED-repo
+    # re-analysis path on the next submission.
+    from app.api.routes import repos as repos_module
+
+    class FailingPool:
+        async def enqueue_job(self, *args, **kwargs):
+            raise RuntimeError("redis unavailable")
+
+    async def fake_get_arq_pool():
+        return FailingPool()
+
+    monkeypatch.setattr(repos_module, "get_arq_pool", fake_get_arq_pool)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _register_and_login(client)
+        url = f"https://github.com/octocat/enqueue-fail-{uuid.uuid4()}"
+        resp = await client.post(
+            "/api/v1/repos/analyze", json={"repo_url": url}, headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 503
+
+        async with async_session_maker() as db:
+            repo_result = await db.execute(select(Repo).where(Repo.url == url))
+            repo = repo_result.scalar_one()
+            job_result = await db.execute(select(Job).where(Job.repo_id == repo.id))
+            job = job_result.scalar_one()
+            assert job.status == JobStatus.FAILED
+            assert job.error_message == "Failed to enqueue analysis job"
+
+
+@pytest.mark.asyncio
+async def test_analyze_stale_pending_repo_creates_new_job():
+    # A repo whose latest job has been PENDING for far longer than the
+    # analysis pipeline could reasonably take (worker died mid-run, or the
+    # job was never picked up) must not poison the URL forever -- it should
+    # be treated like a FAILED repo and get a fresh job.
+    settings = get_settings()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first_token = await _register_and_login(client)
+        url = f"https://github.com/octocat/stale-pending-{uuid.uuid4()}"
+        first_resp = await client.post(
+            "/api/v1/repos/analyze", json={"repo_url": url}, headers={"Authorization": f"Bearer {first_token}"}
+        )
+        repo_id = first_resp.json()["repo_id"]
+        first_job_id = first_resp.json()["job_id"]
+
+        stale_created_at = datetime.now(timezone.utc) - timedelta(
+            seconds=settings.clone_timeout_seconds * 2 + 60
+        )
+        async with async_session_maker() as db:
+            job = await db.get(Job, uuid.UUID(first_job_id))
+            job.created_at = stale_created_at
+            await db.commit()
+        # repo.status and job.status are left at their PENDING defaults --
+        # mirroring a worker that died before ever updating either.
 
         second_token = await _register_and_login(client)
         second_resp = await client.post(
