@@ -203,12 +203,13 @@ git commit -m "Add guest identity: nullable email/password, is_guest flag, POST 
 
 **Files:**
 - Modify: `backend/app/api/deps.py` (rename + relax `get_owned_repo`/`get_owned_conversation`)
+- Modify: `backend/app/api/routes/repos.py` (new `GET /repos/{repo_id}` endpoint — genuinely new, not a relaxed check, but it belongs here since it uses the exact `get_repo_or_404` helper this task introduces)
 - Modify: `backend/app/api/routes/files.py`, `backend/app/api/routes/jobs.py`, `backend/app/api/routes/search.py`, `backend/app/api/routes/conversations.py`, `backend/app/api/routes/chat.py`
 - Modify (flip existing cross-user-rejection tests to cross-user-success): `backend/tests/integration/test_repos_api.py`, `backend/tests/integration/test_files_api.py`, `backend/tests/integration/test_search_api.py`, `backend/tests/integration/test_conversations_api.py`, `backend/tests/integration/test_chat_api.py`
 
 **Interfaces:**
-- Produces: `get_repo_or_404(db, repo_id, user) -> Repo` and `get_conversation_or_404(db, conversation_id, user) -> Conversation` in `app/api/deps.py`, replacing `get_owned_repo`/`get_owned_conversation`. Same signature shape (still takes `user` — needed so every call site keeps compiling without a diff to its call args — but no longer uses it for a comparison; kept as an argument rather than dropped so a future task could reintroduce per-resource logic without changing every call site again, and because dropping it now would touch even more files than necessary for zero behavior gain). 404 on nonexistent, no other status change.
-- Consumes: nothing new — this task's job is entirely about removing a comparison, not adding capability.
+- Produces: `get_repo_or_404(db, repo_id, user) -> Repo` and `get_conversation_or_404(db, conversation_id, user) -> Conversation` in `app/api/deps.py`, replacing `get_owned_repo`/`get_owned_conversation`. Same signature shape (still takes `user` — needed so every call site keeps compiling without a diff to its call args — but no longer uses it for a comparison; kept as an argument rather than dropped so a future task could reintroduce per-resource logic without changing every call site again, and because dropping it now would touch even more files than necessary for zero behavior gain). 404 on nonexistent, no other status change. Also produces `GET /api/v1/repos/{repo_id}` — a genuinely new endpoint, returns `RepoResponse`, needed because no way to fetch a single repo's metadata by id has ever existed (the frontend currently fetches its own repo *list* and filters client-side, which would silently 404 a guest opening someone else's public repo link — the exact scenario this sub-project exists to support). Sub-project 3B's workspace page will call this directly instead of list-and-filter.
+- Consumes: nothing new for the relaxed-check part of this task; the new endpoint consumes `RepoResponse` from `app/schemas/repos.py` (already defined, already used by `list_repos` in the same file).
 
 This task changes the *meaning* of five existing tests from "must reject" to "must succeed" — read each one's current body before editing; don't guess from the name alone.
 
@@ -254,7 +255,58 @@ async def get_conversation_or_404(db: AsyncSession, conversation_id: UUID, user:
     return conversation
 ```
 
-- [ ] **Step 2: Update every call site**
+- [ ] **Step 2: Add `GET /repos/{repo_id}`**
+
+In `backend/app/api/routes/repos.py`, add `UUID` to the imports (line 1 currently reads `from typing import Annotated` — add a new line above it: `from uuid import UUID`), and change line 8's import from `from app.api.deps import get_current_user` to `from app.api.deps import get_current_user, get_repo_or_404`.
+
+Add this route (anywhere in the file — FastAPI has no ordering conflict between `@router.get("")` and `@router.get("/{repo_id}")`, they match different path shapes):
+
+```python
+@router.get("/{repo_id}", response_model=RepoResponse)
+async def get_repo(
+    repo_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Repo:
+    return await get_repo_or_404(db, repo_id, current_user)
+```
+
+Add a test to `backend/tests/integration/test_repos_api.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_get_repo_by_id_accessible_by_other_users():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        owner_token = await _register_and_login(client)
+        analyze_resp = await client.post(
+            "/api/v1/repos/analyze",
+            json={"repo_url": "https://github.com/octocat/get-repo-test"},
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        repo_id = analyze_resp.json()["repo_id"]
+
+        owner_resp = await client.get(f"/api/v1/repos/{repo_id}", headers={"Authorization": f"Bearer {owner_token}"})
+        assert owner_resp.status_code == 200
+        assert owner_resp.json()["id"] == repo_id
+
+        other_token = await _register_and_login(client)
+        other_resp = await client.get(f"/api/v1/repos/{repo_id}", headers={"Authorization": f"Bearer {other_token}"})
+        assert other_resp.status_code == 200
+        assert other_resp.json()["id"] == repo_id
+
+
+@pytest.mark.asyncio
+async def test_get_repo_by_id_returns_404_for_nonexistent_repo():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _register_and_login(client)
+        resp = await client.get(f"/api/v1/repos/{uuid.uuid4()}", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 404
+```
+
+Run: `venv/Scripts/python.exe -m pytest tests/integration/test_repos_api.py -v -k get_repo_by_id`
+Expected: both new tests PASS immediately (this step writes the route and its test together rather than test-first, since the route is a two-line pass-through to `get_repo_or_404`, already proven correct by Step 1's own tests — there's no meaningful "watch it fail for the right reason" step for a delegation this thin).
+
+- [ ] **Step 3: Update every call site**
 
 `backend/app/api/routes/files.py`: line 8 import `get_owned_repo` → `get_repo_or_404`; lines 52 and 65, `await get_owned_repo(db, repo_id, current_user)` → `await get_repo_or_404(db, repo_id, current_user)`.
 
@@ -314,7 +366,7 @@ with:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found")
 ```
 
-- [ ] **Step 3: Flip the five existing cross-user-rejection tests**
+- [ ] **Step 4: Flip the five existing cross-user-rejection tests**
 
 Each of these currently asserts `404` when a *different* user reads/writes a resource they didn't create. Under this task's change, all of these must now succeed. Read each test as it exists today before editing — do not just search-and-replace `404` with `200`, since some of these tests also assert on response bodies that need real values filled in.
 
@@ -361,21 +413,21 @@ Also add a new assertion to the existing `test_create_list_conversations_and_emp
 
 (this endpoint returns a streaming response; `httpx.AsyncClient.post` without using `client.stream(...)` still works here as a smoke check of the status code — follow the exact pattern the file's other, non-streaming-assertion tests already use, or switch to `client.stream(...)` and drain it like the file's other tests do, implementer's call, as long as the assertion is meaningful.)
 
-- [ ] **Step 4: Run the affected test files**
+- [ ] **Step 5: Run the affected test files**
 
 Run: `venv/Scripts/python.exe -m pytest tests/integration/test_repos_api.py tests/integration/test_files_api.py tests/integration/test_search_api.py tests/integration/test_conversations_api.py tests/integration/test_chat_api.py -v`
 Expected: all PASS, including every test in these files that this task didn't touch (e.g. `test_list_repos_returns_only_the_requesting_users_repos` in `test_repos_api.py` must still pass unchanged — it's the one deliberately-still-private endpoint).
 
-- [ ] **Step 5: Run the full test suite**
+- [ ] **Step 6: Run the full test suite**
 
 Run: `venv/Scripts/python.exe -m pytest tests -q`
 Expected: all pass.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add backend/app/api/deps.py backend/app/api/routes/files.py backend/app/api/routes/jobs.py backend/app/api/routes/search.py backend/app/api/routes/conversations.py backend/app/api/routes/chat.py backend/tests/integration/test_repos_api.py backend/tests/integration/test_files_api.py backend/tests/integration/test_search_api.py backend/tests/integration/test_conversations_api.py backend/tests/integration/test_chat_api.py
-git commit -m "Make repo/job/search/conversation/message reads public; keep GET /repos personal"
+git add backend/app/api/deps.py backend/app/api/routes/repos.py backend/app/api/routes/files.py backend/app/api/routes/jobs.py backend/app/api/routes/search.py backend/app/api/routes/conversations.py backend/app/api/routes/chat.py backend/tests/integration/test_repos_api.py backend/tests/integration/test_files_api.py backend/tests/integration/test_search_api.py backend/tests/integration/test_conversations_api.py backend/tests/integration/test_chat_api.py
+git commit -m "Make repo reads public (incl. new GET /repos/{id}); keep GET /repos list personal"
 ```
 
 ---
