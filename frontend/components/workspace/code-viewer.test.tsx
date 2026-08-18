@@ -2,6 +2,14 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CodeViewer } from "./code-viewer";
 
+// Real Shiki's WASM cold-start is CPU-intensive and contention-sensitive
+// (see lib/highlight.test.ts, which needs an explicit 15000ms timeout for
+// the same highlightCode() call). This is a component-level test -- it
+// shouldn't depend on the real syntax highlighter at all, so mock it out.
+jest.mock("../../lib/highlight", () => ({
+  highlightCode: async (code: string) => `<pre><code>${code}</code></pre>`,
+}));
+
 describe("CodeViewer", () => {
   afterEach(() => {
     jest.restoreAllMocks();
