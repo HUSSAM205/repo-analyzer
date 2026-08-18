@@ -31,4 +31,22 @@ describe("FileTreeNode", () => {
     render(<FileTreeNode entry={fileEntry} depth={0} selectedPath="main.py" onSelectFile={jest.fn()} />);
     expect(screen.getByText("main.py").closest("button")).toHaveClass("bg-accent");
   });
+
+  it("shows a JSON-specific icon for a .json file", () => {
+    const entry = { name: "package.json", path: "package.json", type: "file" as const, children: null };
+    render(<FileTreeNode entry={entry} depth={0} selectedPath={null} onSelectFile={jest.fn()} />);
+    expect(screen.getByTestId("file-icon-json")).toBeInTheDocument();
+  });
+
+  it("falls back to a generic file icon for an unrecognized extension", () => {
+    const entry = { name: "data.xyz", path: "data.xyz", type: "file" as const, children: null };
+    render(<FileTreeNode entry={entry} depth={0} selectedPath={null} onSelectFile={jest.fn()} />);
+    expect(screen.getByTestId("file-icon-default")).toBeInTheDocument();
+  });
+
+  it("adds an accent border to the active file", () => {
+    const entry = { name: "main.py", path: "src/main.py", type: "file" as const, children: null };
+    render(<FileTreeNode entry={entry} depth={0} selectedPath="src/main.py" onSelectFile={jest.fn()} />);
+    expect(screen.getByRole("button")).toHaveClass("border-l-2");
+  });
 });
