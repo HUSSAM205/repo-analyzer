@@ -22,7 +22,7 @@ export function RepoHeader({ repo, job, polling }: { repo: Repo; job: Job | null
           />
         )}
         {status === "ready" || status === "completed" ? (
-          <span className="h-2 w-2 rounded-full bg-emerald-400" />
+          <span data-testid="repo-status" className="h-2 w-2 rounded-full bg-emerald-400" />
         ) : null}
         {status === "failed" && <span className="h-2 w-2 rounded-full bg-destructive" />}
       </div>
