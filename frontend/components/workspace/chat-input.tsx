@@ -40,7 +40,7 @@ export function ChatInput({
         rows={1}
         placeholder="Ask about this repo..."
         disabled={disabled}
-        className="max-h-32 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground"
+        className="max-h-32 flex-1 resize-none rounded-sm bg-transparent px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground focus-visible:elevated-ring"
       />
       <Button type="submit" size="icon" disabled={disabled || !value.trim()} aria-label="Send message">
         <ArrowUp className="h-4 w-4" />

@@ -48,7 +48,7 @@ export function FileTreeNode({
           style={{ paddingLeft: `${depth * 14 + 8}px` }}
           className={cn(
             "flex w-full items-center gap-1.5 rounded-sm border-l-2 border-transparent py-1 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-            selectedPath === entry.path && "border-primary bg-accent text-foreground"
+            selectedPath === entry.path && "elevated-ring border-primary bg-accent text-foreground"
           )}
         >
           <Icon data-testid={`file-icon-${iconKey}`} className="h-3.5 w-3.5 shrink-0" />
