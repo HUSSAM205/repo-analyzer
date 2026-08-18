@@ -18,7 +18,7 @@ export function WorkspaceShell({
   const [rightOpen, setRightOpen] = useState(true);
 
   return (
-    <div className="flex h-[calc(100vh-3.5rem)] w-full overflow-hidden">
+    <div className="flex min-h-0 w-full flex-1 overflow-hidden">
       <AnimatePresence initial={false}>
         {leftOpen && (
           <motion.aside
