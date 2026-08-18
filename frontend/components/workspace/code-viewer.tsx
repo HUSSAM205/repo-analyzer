@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
+import { Check, Copy } from "lucide-react";
 import { highlightCode } from "@/lib/highlight";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api-client";
@@ -9,6 +10,8 @@ import type { FileContentResponse } from "@/lib/types";
 
 export function CodeViewer({ repoId, path }: { repoId: string; path: string | null }) {
   const [html, setHtml] = useState<string | null>(null);
+  const [rawContent, setRawContent] = useState<string>("");
+  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -21,13 +24,17 @@ export function CodeViewer({ repoId, path }: { repoId: string; path: string | nu
     let cancelled = false;
     setHtml(null);
     setError(null);
+    setCopied(false);
 
     apiFetch(`/api/repos/${repoId}/files/content?path=${encodeURIComponent(path)}`, { cache: "no-store" })
       .then((res) => {
         if (!res.ok) throw new Error("Failed to load file content");
         return res.json() as Promise<FileContentResponse>;
       })
-      .then((data) => highlightCode(data.content, path))
+      .then((data) => {
+        if (!cancelled) setRawContent(data.content);
+        return highlightCode(data.content, path);
+      })
       .then((highlighted) => {
         if (!cancelled) setHtml(highlighted);
       })
@@ -39,6 +46,12 @@ export function CodeViewer({ repoId, path }: { repoId: string; path: string | nu
       cancelled = true;
     };
   }, [repoId, path]);
+
+  async function handleCopy() {
+    await navigator.clipboard.writeText(rawContent);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
 
   if (!path) {
     return (
@@ -63,13 +76,26 @@ export function CodeViewer({ repoId, path }: { repoId: string; path: string | nu
   }
 
   return (
-    <motion.div
-      key={path}
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.15 }}
-      className="shiki-line-numbers h-full overflow-auto p-4 font-mono text-sm leading-relaxed [&_pre]:!bg-transparent [&_pre]:whitespace-pre"
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <div className="flex h-full flex-col">
+      <div className="sticky top-0 z-10 flex items-center justify-between border-b border-zinc-800/60 bg-card/60 px-4 py-2 backdrop-blur-sm">
+        <span className="truncate font-mono text-xs text-zinc-400">{path}</span>
+        <button
+          type="button"
+          onClick={handleCopy}
+          aria-label={copied ? "Copied" : "Copy file contents"}
+          className="rounded-md border border-zinc-800/60 p-1 text-zinc-400 transition-colors hover:text-zinc-100"
+        >
+          {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+        </button>
+      </div>
+      <motion.div
+        key={path}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.15 }}
+        className="shiki-line-numbers flex-1 overflow-auto p-4 font-mono text-sm leading-relaxed [&_pre]:!bg-transparent [&_pre]:whitespace-pre"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    </div>
   );
 }

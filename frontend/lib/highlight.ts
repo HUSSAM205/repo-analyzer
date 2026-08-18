@@ -23,7 +23,7 @@ let highlighterPromise: Promise<Highlighter> | null = null;
 
 function getHighlighter(): Promise<Highlighter> {
   if (!highlighterPromise) {
-    highlighterPromise = createHighlighter({ themes: ["github-dark"], langs: SUPPORTED_LANGS });
+    highlighterPromise = createHighlighter({ themes: ["tokyo-night"], langs: SUPPORTED_LANGS });
   }
   return highlighterPromise;
 }
@@ -38,5 +38,5 @@ export async function highlightCode(code: string, pathOrLanguage: string): Promi
   const highlighter = await getHighlighter();
   const loadedLangs = highlighter.getLoadedLanguages();
   const effectiveLang = loadedLangs.includes(lang) ? lang : "text";
-  return highlighter.codeToHtml(code, { lang: effectiveLang, theme: "github-dark" });
+  return highlighter.codeToHtml(code, { lang: effectiveLang, theme: "tokyo-night" });
 }
