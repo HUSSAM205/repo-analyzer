@@ -30,7 +30,7 @@ export function RepoList({ repos }: { repos: Repo[] }) {
         >
           <Link
             href={`/repos/${repo.id}`}
-            className="flex items-center justify-between rounded-lg border border-border bg-card px-4 py-3 transition-colors hover:border-primary/40"
+            className="flex items-center justify-between rounded-lg border border-border bg-card px-4 py-3 transition-colors hover:border-primary/40 hover:elevated-ring"
           >
             <span className="font-mono text-sm">{repo.name}</span>
             <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_STYLES[repo.status]}`}>

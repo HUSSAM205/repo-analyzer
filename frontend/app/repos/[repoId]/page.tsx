@@ -29,13 +29,17 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
     let cancelled = false;
     setError(null);
 
-    apiFetch("/api/repos", { cache: "no-store" })
+    apiFetch(`/api/repos/${params.repoId}`, { cache: "no-store" })
       .then((res) => {
-        if (!res.ok) throw new Error("Failed to load repositories");
-        return res.json() as Promise<Repo[]>;
+        if (res.status === 404) {
+          if (!cancelled) setRepo(null);
+          return null;
+        }
+        if (!res.ok) throw new Error("Failed to load repository");
+        return res.json() as Promise<Repo>;
       })
-      .then((repos) => {
-        if (!cancelled) setRepo(repos.find((r) => r.id === params.repoId) ?? null);
+      .then((repo) => {
+        if (!cancelled && repo) setRepo(repo);
       })
       .catch(() => {
         if (!cancelled) setError("Could not load this repository.");

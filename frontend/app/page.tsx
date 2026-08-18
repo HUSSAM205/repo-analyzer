@@ -1,19 +1,25 @@
-import Link from "next/link";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { getSessionToken } from "@/lib/session";
 
+// Only redirects into the workspace once a session cookie actually exists --
+// i.e. once the middleware's guest-mint has succeeded at least once. If it
+// unconditionally redirected to /repos, and /repos in turn redirects back to
+// "/" whenever it finds no token (see app/repos/page.tsx), a persistently
+// failing guest-mint (backend down) would bounce the browser between "/" and
+// "/repos" forever instead of ever landing on a real page.
 export default function HomePage() {
+  cookies(); // opts this route into dynamic rendering (reads the session cookie)
+  const token = getSessionToken();
+  if (token) {
+    redirect("/repos");
+  }
+
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-6 px-4 text-center">
-      <h1 className="text-4xl font-semibold tracking-tight">Repo Analyzer</h1>
-      <p className="max-w-md text-muted-foreground">
-        Analyze a GitHub repository, browse its code, and chat with an AI that
-        cites the exact files and lines it&apos;s talking about.
+    <main className="flex min-h-screen flex-col items-center justify-center gap-4 px-4 text-center">
+      <p className="text-sm text-muted-foreground">
+        Having trouble connecting to the server. Please refresh the page.
       </p>
-      <Link
-        href="/repos"
-        className="rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-      >
-        Get started
-      </Link>
     </main>
   );
 }

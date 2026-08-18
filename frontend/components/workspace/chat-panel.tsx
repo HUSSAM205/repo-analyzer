@@ -12,6 +12,8 @@ import { parseSSEChunk } from "@/lib/sse";
 import { apiFetch } from "@/lib/api-client";
 import type { ChatMessage as ChatMessageType, Conversation } from "@/lib/types";
 
+const QUICK_PROMPTS = ["Explain repo architecture", "Find security vulnerabilities", "List API routes"];
+
 export function ChatPanel({ repoId }: { repoId: string }) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -218,9 +220,25 @@ export function ChatPanel({ repoId }: { repoId: string }) {
         <ScrollArea className="h-full p-3" viewportRef={scrollViewportRef}>
           <div className="space-y-3">
             {messages.length === 0 && !isStreaming && (
-              <p className="p-4 text-center text-sm text-muted-foreground">
-                {activeId ? "No messages yet. Ask something below." : "Start a conversation to chat about this repo."}
-              </p>
+              <div className="space-y-3 p-4 text-center">
+                <p className="text-sm text-muted-foreground">
+                  {activeId ? "No messages yet. Ask something below." : "Start a conversation to chat about this repo."}
+                </p>
+                {activeId && (
+                  <div className="flex flex-wrap justify-center gap-2">
+                    {QUICK_PROMPTS.map((prompt) => (
+                      <button
+                        key={prompt}
+                        type="button"
+                        onClick={() => handleSend(prompt)}
+                        className="rounded-full border border-zinc-800/60 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:border-zinc-700/50 hover:text-zinc-100"
+                      >
+                        {prompt}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
             {messages.map((m) => (
               <ChatMessage key={m.id} role={m.role} content={m.content} />
@@ -239,7 +257,15 @@ export function ChatPanel({ repoId }: { repoId: string }) {
                     {statusText}
                   </div>
                 )}
-                {streamingText && <ChatMessage role="assistant" content={streamingText} />}
+                {streamingText && (
+                  <div className="flex items-end gap-1">
+                    <ChatMessage role="assistant" content={streamingText} />
+                    <span
+                      data-testid="streaming-cursor"
+                      className="mb-2 h-3 w-1.5 shrink-0 animate-pulse-subtle rounded-sm bg-primary"
+                    />
+                  </div>
+                )}
               </div>
             )}
             {error && (

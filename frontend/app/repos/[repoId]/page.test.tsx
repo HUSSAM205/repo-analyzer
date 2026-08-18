@@ -35,6 +35,20 @@ jest.mock("../../../components/workspace/code-viewer", () => ({
   CodeViewer: () => <div data-testid="code-viewer" />,
 }));
 
+// Unlike its siblings above, ChatPanel was previously left unmocked here.
+// It runs its own real fetch to `/api/repos/{id}/conversations` and its own
+// setInterval-driven effects, which is harmless while `repo` fetch fails or
+// notFound() fires early -- but once the repo-detail fetch actually
+// succeeds and the shell renders, that live component keeps state updates
+// in flight past this test's own assertions, and those updates racing into
+// a later test's render (e.g. the notFound() test, which intentionally
+// throws) surface as a flaky uncaught exception attributed to whichever
+// test happens to be running when they land. Mocking it the same way as
+// the other workspace children removes that cross-test timing hazard.
+jest.mock("../../../components/workspace/chat-panel", () => ({
+  ChatPanel: () => <div data-testid="chat-panel" />,
+}));
+
 describe("RepoWorkspacePage error handling", () => {
   afterEach(() => {
     jest.restoreAllMocks();
@@ -79,7 +93,7 @@ describe("RepoWorkspacePage error handling", () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [repo],
+      json: async () => repo,
     }) as unknown as typeof fetch;
 
     render(<RepoWorkspacePage params={{ repoId: "some-repo-id" }} />);
@@ -90,5 +104,19 @@ describe("RepoWorkspacePage error handling", () => {
 
     expect(screen.getByTestId("repo-header")).toBeInTheDocument();
     expect(screen.queryByText("Could not load this repository.")).not.toBeInTheDocument();
+  });
+
+  it("calls notFound() when the repo endpoint returns 404", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => ({ detail: "Repo not found" }),
+    }) as unknown as typeof fetch;
+
+    render(<RepoWorkspacePage params={{ repoId: "some-repo-id" }} />);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("workspace-shell")).not.toBeInTheDocument();
+    });
   });
 });

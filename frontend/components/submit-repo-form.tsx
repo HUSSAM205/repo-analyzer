@@ -6,9 +6,10 @@ import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api-client";
+import { cn } from "@/lib/utils";
 import type { AnalyzeRepoResponse } from "@/lib/types";
 
-export function SubmitRepoForm() {
+export function SubmitRepoForm({ compact = false }: { compact?: boolean } = {}) {
   const router = useRouter();
   const [url, setUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -47,7 +48,7 @@ export function SubmitRepoForm() {
       animate={{ opacity: 1 }}
       transition={{ duration: 0.2 }}
       onSubmit={handleSubmit}
-      className="glass flex items-center gap-2 rounded-lg p-3"
+      className={cn("glass flex items-center gap-2 rounded-lg", compact ? "p-1.5" : "p-3")}
     >
       <Input
         type="url"
@@ -56,6 +57,7 @@ export function SubmitRepoForm() {
         value={url}
         onChange={(e) => setUrl(e.target.value)}
         aria-label="GitHub repository URL"
+        className="focus-visible:elevated-ring"
       />
       <Button type="submit" disabled={submitting}>
         {submitting ? "Submitting..." : "Analyze"}

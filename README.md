@@ -135,17 +135,27 @@ response instead of a real model — useful for local development and
 the e2e suite without spending on a real API. Never use this in a
 real deployment; it's a testing/dev convenience only.
 
-### Guest access (sub-project 3B)
+### Guest access, no registration required (sub-project 3B)
 
-The backend also supports guest access via `POST /api/v1/auth/guest`, which
-provisions a temporary access token without requiring user registration — this
-capability is used by the frontend once sub-project 3B ships.
+The frontend no longer has registration or login pages. Visiting the app at
+`/` lands you straight in the repo workspace at `/repos`: middleware calls
+the backend's `POST /api/v1/auth/guest` transparently on first visit,
+provisioning a temporary access token and setting a session cookie — there's
+no account to create and no sign-in step. Each browser (or each fresh
+incognito/private window) gets its own independent guest session this way.
 
 **Everything on this deployment is public by design.** There is no private
 data model: any repo URL submitted, the resulting analyzed file contents, job
 error messages, and every conversation held about a repo (not just the
 current visitor's own) are all readable by anyone who has the link — not
 only the person who submitted or wrote them.
+
+#### Optional: GitHub Star/Fork link
+
+Set `NEXT_PUBLIC_GITHUB_REPO_URL` (a frontend build-time env var) to the
+project's GitHub URL to show a "Star" link with a GitHub icon in the header.
+It's unset by default, which hides the link entirely — no placeholder or
+guessed URL is ever shown.
 
 ### Full stack via Docker
 

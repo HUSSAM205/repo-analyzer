@@ -1,14 +1,10 @@
 import { test, expect } from "@playwright/test";
-import { FIXTURE_REPO_URL, TEST_PASSWORD, uniqueEmail } from "./fixtures";
+import { FIXTURE_REPO_URL } from "./fixtures";
 
-test("full user loop: register, analyze a repo, browse it, and chat", async ({ page }) => {
-  const email = uniqueEmail();
-
-  // Register
-  await page.goto("/register");
-  await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(TEST_PASSWORD);
-  await page.getByRole("button", { name: /create account/i }).click();
+test("full guest loop: analyze a repo, browse it, and chat", async ({ page }) => {
+  // Visiting the app lands directly in the workspace -- a guest session is
+  // minted transparently, no registration or login required.
+  await page.goto("/");
   await expect(page).toHaveURL(/\/repos$/, { timeout: 15000 });
 
   // Submit a repo for analysis
@@ -16,8 +12,12 @@ test("full user loop: register, analyze a repo, browse it, and chat", async ({ p
   await page.getByRole("button", { name: /analyze/i }).click();
   await expect(page).toHaveURL(/\/repos\/[^/]+\?job=/, { timeout: 15000 });
 
-  // Wait for analysis to complete (poll indicator turns from yellow to green)
-  await expect(page.locator("header .bg-emerald-400")).toBeVisible({ timeout: 60000 });
+  // Wait for analysis to complete (poll indicator turns from yellow to green).
+  // Uses a dedicated testid (rather than a CSS-class locator) so this can't
+  // accidentally match AppHeader's unrelated backend-health dot, which also
+  // renders as a `header .bg-emerald-400` element once the global header
+  // is on every page.
+  await expect(page.getByTestId("repo-status")).toBeVisible({ timeout: 60000 });
 
   // Browse the file tree and open a file
   const fileNode = page.getByText("README", { exact: false }).first();

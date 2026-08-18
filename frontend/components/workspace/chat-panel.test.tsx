@@ -155,6 +155,115 @@ describe("ChatPanel error retry", () => {
   });
 });
 
+describe("ChatPanel quick prompts and streaming cursor", () => {
+  const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+
+  it("shows quick-prompt pills when the active conversation has no messages yet", async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    expect(await screen.findByRole("button", { name: "Explain repo architecture" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Find security vulnerabilities" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "List API routes" })).toBeInTheDocument();
+  });
+
+  it("clicking a quick-prompt pill sends it immediately via the existing send path", async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        expect(JSON.parse(init?.body as string)).toEqual({ content: "List API routes" });
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([
+            sseFrame("token", { text: "Here are the routes." }),
+            sseFrame("done", { message_id: "m2" }),
+          ]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+    const pill = await screen.findByRole("button", { name: "List API routes" });
+
+    await userEvent.click(pill);
+
+    expect(await screen.findByText("Here are the routes.")).toBeInTheDocument();
+  });
+
+  it("shows a streaming cursor while a response is still arriving", async () => {
+    // A reader whose stream never signals `done` after its first token,
+    // simulating a response still in flight -- so isStreaming stays true
+    // for the duration of this test instead of settling immediately.
+    function makeHangingStreamingBody(frames: string[]) {
+      const encoder = new TextEncoder();
+      let i = 0;
+      return {
+        getReader() {
+          return {
+            async read() {
+              if (i < frames.length) {
+                const chunk = encoder.encode(frames[i]);
+                i += 1;
+                return { done: false, value: chunk };
+              }
+              return new Promise(() => {}); // never resolves -- stream stays "open"
+            },
+          };
+        },
+      };
+    }
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          body: makeHangingStreamingBody([sseFrame("token", { text: "Still working..." })]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "hi");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    expect(await screen.findByTestId("streaming-cursor")).toBeInTheDocument();
+  });
+});
+
 describe("ChatPanel auto-scroll", () => {
   function mockScrollMetrics(
     el: Element,
