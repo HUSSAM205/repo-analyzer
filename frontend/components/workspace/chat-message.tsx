@@ -1,11 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, FileCode2 } from "lucide-react";
+import { highlightCode } from "@/lib/highlight";
 import { cn } from "@/lib/utils";
 import type { Element, ElementContent } from "hast";
+
+// Matches the backend agent's citation format (see
+// backend/app/core/agent.py's system prompt): an inline code span like
+// `path/to/file.py:12-18` -- a file path plus a 1-based line or line-range
+// suffix. Rendered as a clickable pill instead of a plain inline-code span.
+const CITATION_PATTERN = /^[\w./-]+\.\w+:\d+(-\d+)?$/;
 
 // Recursively collect the raw text content of a hast node — used to read a
 // fenced code block's literal text straight from the tree, regardless of
@@ -22,10 +29,39 @@ function getNodeText(node: Element | ElementContent | undefined): string {
   return "";
 }
 
-function CodeBlock({ children }: { children: string }) {
+// `language` is the fence's language tag (e.g. "python"), already stripped
+// of the `language-` className prefix by the `pre` renderer below -- or
+// `undefined` for an untagged ``` fence, in which case this intentionally
+// never calls Shiki at all and just renders plain text, matching prior
+// behavior (cheaper, and there's no language to highlight against anyway).
+function CodeBlock({ children, language }: { children: string; language?: string }) {
   const [copied, setCopied] = useState(false);
+  // Effect-driven, same pattern as code-viewer.tsx: `highlightCode` is
+  // async, so start out showing the plain-text version and swap in the
+  // highlighted HTML once it resolves.
+  const [html, setHtml] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!language) {
+      setHtml(null);
+      return;
+    }
+    let cancelled = false;
+    highlightCode(children, language)
+      .then((highlighted) => {
+        if (!cancelled) setHtml(highlighted);
+      })
+      .catch(() => {
+        if (!cancelled) setHtml(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [children, language]);
 
   async function handleCopy() {
+    // Always copies the raw, un-highlighted text -- unaffected by whether
+    // Shiki has resolved yet.
     await navigator.clipboard.writeText(children);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
@@ -41,14 +77,29 @@ function CodeBlock({ children }: { children: string }) {
       >
         {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
       </button>
-      <pre className="font-mono text-xs leading-relaxed">
-        <code>{children}</code>
-      </pre>
+      {html ? (
+        <div
+          className="shiki-chat-block font-mono text-xs leading-relaxed [&_pre]:!bg-transparent [&_pre]:whitespace-pre"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      ) : (
+        <pre className="font-mono text-xs leading-relaxed">
+          <code>{children}</code>
+        </pre>
+      )}
     </div>
   );
 }
 
-export function ChatMessage({ role, content }: { role: "user" | "assistant"; content: string }) {
+export function ChatMessage({
+  role,
+  content,
+  onCitationClick,
+}: {
+  role: "user" | "assistant";
+  content: string;
+  onCitationClick?: (path: string) => void;
+}) {
   const isUser = role === "user";
   return (
     <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
@@ -70,7 +121,21 @@ export function ChatMessage({ role, content }: { role: "user" | "assistant"; con
                 // `pre` is the structurally reliable place to detect "this is a
                 // block" — unlike checking the <code> element's `className`,
                 // which is only set when the fence has a language tag.
-                code({ className, children, ...props }) {
+                code({ className, children, node, ...props }) {
+                  const text = getNodeText(node).trim();
+                  if (CITATION_PATTERN.test(text)) {
+                    const path = text.replace(/:\d+(-\d+)?$/, "");
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => onCitationClick?.(path)}
+                        className="mx-0.5 inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-1.5 py-0.5 align-middle font-mono text-[11px] text-primary transition-colors hover:bg-primary/20"
+                      >
+                        <FileCode2 className="h-3 w-3 shrink-0" />
+                        {text}
+                      </button>
+                    );
+                  }
                   return (
                     <code className={cn("rounded bg-black/30 px-1 py-0.5 font-mono text-xs", className)} {...props}>
                       {children}
@@ -82,7 +147,12 @@ export function ChatMessage({ role, content }: { role: "user" | "assistant"; con
                     (child): child is Element => child.type === "element" && child.tagName === "code"
                   );
                   const text = getNodeText(codeNode ?? node).replace(/\n$/, "");
-                  return <CodeBlock>{text}</CodeBlock>;
+                  const classNames = codeNode?.properties?.className;
+                  const langClass = Array.isArray(classNames)
+                    ? classNames.find((c): c is string => typeof c === "string" && c.startsWith("language-"))
+                    : undefined;
+                  const language = langClass?.slice("language-".length);
+                  return <CodeBlock language={language}>{text}</CodeBlock>;
                 },
               }}
             >

@@ -14,7 +14,13 @@ import type { ChatMessage as ChatMessageType, Conversation } from "@/lib/types";
 
 const QUICK_PROMPTS = ["Explain repo architecture", "Find security vulnerabilities", "List API routes"];
 
-export function ChatPanel({ repoId }: { repoId: string }) {
+export function ChatPanel({
+  repoId,
+  onCitationClick,
+}: {
+  repoId: string;
+  onCitationClick?: (path: string) => void;
+}) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
@@ -260,7 +266,7 @@ export function ChatPanel({ repoId }: { repoId: string }) {
               </div>
             )}
             {messages.map((m) => (
-              <ChatMessage key={m.id} role={m.role} content={m.content} />
+              <ChatMessage key={m.id} role={m.role} content={m.content} onCitationClick={onCitationClick} />
             ))}
             {isStreaming && (
               <div className="space-y-2">
@@ -278,7 +284,7 @@ export function ChatPanel({ repoId }: { repoId: string }) {
                 )}
                 {streamingText && (
                   <div className="flex items-end gap-1">
-                    <ChatMessage role="assistant" content={streamingText} />
+                    <ChatMessage role="assistant" content={streamingText} onCitationClick={onCitationClick} />
                     <span
                       data-testid="streaming-cursor"
                       className="mb-2 h-3 w-1.5 shrink-0 animate-pulse-subtle rounded-sm bg-primary"
