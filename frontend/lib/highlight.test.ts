@@ -1,4 +1,4 @@
-import { highlightCode, languageForPath } from "./highlight";
+import { exceedsHighlightLimit, highlightCode, languageForPath, MAX_HIGHLIGHT_LENGTH } from "./highlight";
 
 describe("languageForPath", () => {
   it("maps known extensions to Shiki language ids", () => {
@@ -22,4 +22,19 @@ describe("highlightCode", () => {
     const html = await highlightCode("plain text content", "notes.txt");
     expect(html).toContain("plain text content");
   }, 15000);
+});
+
+describe("exceedsHighlightLimit", () => {
+  it("is false for ordinary source file sizes", () => {
+    expect(exceedsHighlightLimit("def foo():\n    return 1\n")).toBe(false);
+    expect(exceedsHighlightLimit("x".repeat(MAX_HIGHLIGHT_LENGTH))).toBe(false);
+  });
+
+  it("is true once content exceeds the threshold", () => {
+    // A large generated/minified/vendored file -- Shiki's synchronous
+    // tokenize-and-render pass over content like this can noticeably
+    // freeze the tab with no warning, which is exactly what this guard
+    // exists to prevent (see code-viewer.tsx).
+    expect(exceedsHighlightLimit("x".repeat(MAX_HIGHLIGHT_LENGTH + 1))).toBe(true);
+  });
 });

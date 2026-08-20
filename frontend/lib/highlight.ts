@@ -19,6 +19,17 @@ const EXTENSION_TO_LANG: Record<string, string> = {
 
 const SUPPORTED_LANGS = Array.from(new Set(Object.values(EXTENSION_TO_LANG)));
 
+// Shiki's codeToHtml() is a synchronous tokenize-and-render pass. Run on a
+// large generated/minified/vendored file with no guard, it can noticeably
+// freeze the tab with no warning to the user. ~300KB is comfortably above
+// any normal hand-written source file while still catching the worst
+// offenders (bundles, lockfiles, minified vendor drops, etc).
+export const MAX_HIGHLIGHT_LENGTH = 300_000;
+
+export function exceedsHighlightLimit(content: string): boolean {
+  return content.length > MAX_HIGHLIGHT_LENGTH;
+}
+
 let highlighterPromise: Promise<Highlighter> | null = null;
 
 function getHighlighter(): Promise<Highlighter> {

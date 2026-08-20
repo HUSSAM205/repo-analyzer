@@ -8,6 +8,7 @@ import { CodeViewer } from "./code-viewer";
 // shouldn't depend on the real syntax highlighter at all, so mock it out.
 jest.mock("../../lib/highlight", () => ({
   highlightCode: async (code: string) => `<pre><code>${code}</code></pre>`,
+  exceedsHighlightLimit: (content: string) => content.length > 300_000,
 }));
 
 describe("CodeViewer", () => {
@@ -24,6 +25,21 @@ describe("CodeViewer", () => {
     render(<CodeViewer repoId="r1" path="src/main.py" />);
 
     await waitFor(() => expect(screen.getByText("src/main.py")).toBeInTheDocument());
+  });
+
+  it("skips syntax highlighting and shows a fallback for a file over the size guard", async () => {
+    const hugeContent = "x".repeat(300_001);
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ path: "vendor/bundle.js", content: hugeContent }),
+    }) as unknown as typeof fetch;
+
+    render(<CodeViewer repoId="r1" path="vendor/bundle.js" />);
+
+    expect(await screen.findByText(/too large to preview with syntax highlighting/i)).toBeInTheDocument();
+    // The path header (and copy button) should still be usable even in the fallback state.
+    expect(screen.getByText("vendor/bundle.js")).toBeInTheDocument();
+    expect(screen.getByLabelText("Copy file contents")).toBeInTheDocument();
   });
 
   it("copies the file's content and shows a checkmark", async () => {
