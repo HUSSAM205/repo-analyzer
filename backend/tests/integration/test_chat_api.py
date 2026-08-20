@@ -189,7 +189,7 @@ async def test_send_message_truncates_history_to_max_history_messages(monkeypatc
 
     captured_calls: list[list[AgentMessage]] = []
 
-    async def fake_run_agent(llm_client, search_fn, messages):
+    async def fake_run_agent(llm_client, tools, tool_functions, messages):
         captured_calls.append(messages)
         yield LLMEvent(type="message_done", message=AgentMessage(role="assistant", content="ok"))
 
@@ -265,7 +265,7 @@ async def test_send_message_history_window_never_starts_with_assistant_message(m
 
     captured_calls: list[list[AgentMessage]] = []
 
-    async def fake_run_agent(llm_client, search_fn, messages):
+    async def fake_run_agent(llm_client, tools, tool_functions, messages):
         captured_calls.append(messages)
         yield LLMEvent(type="message_done", message=AgentMessage(role="assistant", content="ok"))
 
@@ -344,7 +344,7 @@ async def test_send_message_persists_give_up_message_with_no_preceding_tokens(mo
         "I wasn't able to finish researching this within the allowed number of search steps."
     )
 
-    async def fake_run_agent(llm_client, search_fn, messages):
+    async def fake_run_agent(llm_client, tools, tool_functions, messages):
         # No "token" events at all -- mirrors agent.py's give-up path, which
         # writes message_done directly without streaming any tokens first.
         yield LLMEvent(type="message_done", message=AgentMessage(role="assistant", content=give_up_text))

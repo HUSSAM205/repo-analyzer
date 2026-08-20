@@ -5,8 +5,7 @@ from typing import TypedDict
 from langgraph.graph import END, StateGraph
 from langgraph.types import StreamWriter
 
-from app.core.agent_tools import SEARCH_CODE_TOOL_SPEC
-from app.core.llm import LLMClient, LLMEvent, Message, ToolCall
+from app.core.llm import LLMClient, LLMEvent, Message, ToolCall, ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +26,25 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are a code assistant answering questions about a specific GitHub "
-    "repository. Use the search_code tool to find relevant code before "
-    "answering -- never guess at code you haven't seen. When you reference "
-    "code in your answer, always cite it as `path/to/file.py:12-18` (the "
-    "file path and line range). If the search results don't contain enough "
-    "information to answer confidently, say so rather than speculating."
+    "repository. You have three tools -- never guess at code or structure you "
+    "haven't actually seen:\n"
+    "- list_directory: see the files/subdirectories in a directory (empty "
+    "path for the root). Start broad questions like 'explain the "
+    "architecture' here to get an overview before digging in.\n"
+    "- search_code: find code relevant to a topic or keyword when you don't "
+    "already know which file it's in.\n"
+    "- read_file: read one specific file in full, once you know its path "
+    "(from list_directory or search_code output) and need more than a "
+    "chunked snippet -- e.g. a README, config/manifest file, or a source "
+    "file whose full context matters.\n"
+    "For broad architectural questions, prefer list_directory first, then "
+    "read_file on the files that look most load-bearing (README, entry "
+    "points, config), using search_code to fill in specific gaps. When you "
+    "reference code in your answer, always cite it as `path/to/file.py:12-18` "
+    "(the file path and line range) for a search_code result, or just "
+    "`path/to/file.py` for something you read_file'd in full. If you still "
+    "don't have enough information to answer confidently, say so rather than "
+    "speculating."
 )
 
 # 5 was too tight for the more deliberate, multi-step search style of the
@@ -41,7 +54,7 @@ SYSTEM_PROMPT = (
 # old cap, cut off before it could synthesize a final answer.
 MAX_TOOL_ITERATIONS = 8
 
-SearchFn = Callable[[str], Awaitable[str]]
+ToolFn = Callable[[dict], Awaitable[str]]
 
 
 class AgentState(TypedDict):
@@ -50,7 +63,7 @@ class AgentState(TypedDict):
     done: bool
 
 
-def _build_graph(llm_client: LLMClient, search_fn: SearchFn):
+def _build_graph(llm_client: LLMClient, tools: list[ToolSpec], tool_functions: dict[str, ToolFn]):
     async def assistant_node(state: AgentState, writer: StreamWriter) -> dict:
         if state["iterations"] >= MAX_TOOL_ITERATIONS:
             message = Message(
@@ -69,7 +82,7 @@ def _build_graph(llm_client: LLMClient, search_fn: SearchFn):
         accumulated_text = ""
 
         async for event in llm_client.stream_chat(
-            state["messages"], tools=[SEARCH_CODE_TOOL_SPEC], system_prompt=SYSTEM_PROMPT
+            state["messages"], tools=tools, system_prompt=SYSTEM_PROMPT
         ):
             writer(event)
             if event.type == "token":
@@ -105,14 +118,17 @@ def _build_graph(llm_client: LLMClient, search_fn: SearchFn):
         last_message = state["messages"][-1]
         new_messages = list(state["messages"])
         for tool_call in last_message.tool_calls:
-            if tool_call.name == "search_code":
-                try:
-                    result_text = await search_fn(tool_call.arguments.get("query", ""))
-                except Exception:
-                    logger.exception("search_code tool call failed for query=%r", tool_call.arguments.get("query"))
-                    result_text = "search_code failed -- unable to search the repository right now."
-            else:
+            tool_fn = tool_functions.get(tool_call.name)
+            if tool_fn is None:
                 result_text = f"Unknown tool: {tool_call.name}"
+            else:
+                try:
+                    result_text = await tool_fn(tool_call.arguments)
+                except Exception:
+                    logger.exception(
+                        "%s tool call failed for arguments=%r", tool_call.name, tool_call.arguments
+                    )
+                    result_text = f"{tool_call.name} failed -- unable to complete this operation right now."
             writer(LLMEvent(type="tool_result", tool_calls=[tool_call], tool_result_text=result_text))
             new_messages.append(Message(role="tool", content=result_text, tool_call_id=tool_call.id))
         return {"messages": new_messages}
@@ -134,8 +150,13 @@ def _build_graph(llm_client: LLMClient, search_fn: SearchFn):
     return graph.compile()
 
 
-async def run_agent(llm_client: LLMClient, search_fn: SearchFn, messages: list[Message]) -> AsyncIterator[LLMEvent]:
-    graph = _build_graph(llm_client, search_fn)
+async def run_agent(
+    llm_client: LLMClient,
+    tools: list[ToolSpec],
+    tool_functions: dict[str, ToolFn],
+    messages: list[Message],
+) -> AsyncIterator[LLMEvent]:
+    graph = _build_graph(llm_client, tools, tool_functions)
     initial_state: AgentState = {"messages": messages, "iterations": 0, "done": False}
     async for event in graph.astream(initial_state, stream_mode="custom"):
         yield event

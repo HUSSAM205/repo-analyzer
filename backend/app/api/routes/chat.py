@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_conversation_or_404
 from app.core.agent import run_agent
 from app.core.rate_limit import enforce_chat_rate_limit
-from app.core.agent_tools import search_code
+from app.core.agent_tools import ALL_TOOL_SPECS, list_directory, read_file, search_code
 from app.core.llm import Message as AgentMessage
 from app.core.llm_providers import get_llm_client
 from app.db.models import Message, MessageRole, User
@@ -90,9 +90,23 @@ async def send_message(
 
         conversation_messages = [*history, AgentMessage(role="user", content=payload.content)]
 
-        async def search_fn(query: str) -> str:
+        async def search_fn(args: dict) -> str:
             async with async_session_maker() as search_db:
-                return await search_code(search_db, repo_id, query)
+                return await search_code(search_db, repo_id, args.get("query", ""))
+
+        async def list_directory_fn(args: dict) -> str:
+            async with async_session_maker() as search_db:
+                return await list_directory(search_db, repo_id, args.get("path", ""))
+
+        async def read_file_fn(args: dict) -> str:
+            async with async_session_maker() as search_db:
+                return await read_file(search_db, repo_id, args.get("path", ""))
+
+        tool_functions = {
+            "search_code": search_fn,
+            "list_directory": list_directory_fn,
+            "read_file": read_file_fn,
+        }
 
         assistant_text = ""
         # Once message_done has been handled, ignore any further events
@@ -112,15 +126,24 @@ async def send_message(
         # process/loop teardown. Draining fully avoids that entirely.
         done_emitted = False
         try:
-            async for event in run_agent(llm_client, search_fn, conversation_messages):
+            async for event in run_agent(llm_client, ALL_TOOL_SPECS, tool_functions, conversation_messages):
                 if done_emitted:
                     continue
                 if event.type == "token":
                     assistant_text += event.token or ""
                     yield _sse_event("token", {"text": event.token})
                 elif event.type == "tool_call":
-                    query = event.tool_calls[0].arguments.get("query", "") if event.tool_calls else ""
-                    yield _sse_event("tool_call", {"query": query})
+                    # Generic across all three tools: forwards whatever
+                    # arguments this call actually has (query for
+                    # search_code, path for list_directory/read_file)
+                    # alongside which tool it is. The frontend currently
+                    # only uses this event's presence (to show a generic
+                    # "working..." status), not its field contents, so this
+                    # is a compatible superset of the old {"query": ...}
+                    # shape rather than a breaking change.
+                    tc = event.tool_calls[0] if event.tool_calls else None
+                    tool_call_data = {"tool": tc.name, **tc.arguments} if tc else {"tool": None}
+                    yield _sse_event("tool_call", tool_call_data)
                 elif event.type == "tool_result":
                     summary = (event.tool_result_text or "")[:200]
                     yield _sse_event("tool_result", {"summary": summary})

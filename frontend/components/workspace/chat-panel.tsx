@@ -14,6 +14,16 @@ import type { ChatMessage as ChatMessageType, Conversation } from "@/lib/types";
 
 const QUICK_PROMPTS = ["Explain repo architecture", "Find security vulnerabilities", "List API routes"];
 
+// Keyed by the "tool" field the backend now includes on every tool_call SSE
+// event (app/api/routes/chat.py) -- the assistant has three tools, not just
+// search, so a status text hardcoded to "Searching code..." was actively
+// misleading while it was browsing structure or reading a file in full.
+const TOOL_STATUS_TEXT: Record<string, string> = {
+  search_code: "Searching code...",
+  list_directory: "Exploring repo structure...",
+  read_file: "Reading file...",
+};
+
 // A failure before any stream content has been received means the request
 // never reached working chat logic server-side (network drop, or a fast
 // non-2xx like a transient 502/503 while the backend is briefly overloaded
@@ -196,7 +206,8 @@ export function ChatPanel({
             finalText += text;
             setStreamingText((prev) => prev + text);
           } else if (event.type === "tool_call") {
-            setStatusText("Searching code...");
+            const tool = (event.data as { tool?: string }).tool;
+            setStatusText(TOOL_STATUS_TEXT[tool ?? ""] ?? "Working...");
           } else if (event.type === "tool_result") {
             setStatusText(null);
           } else if (event.type === "done") {

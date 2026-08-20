@@ -1,18 +1,21 @@
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.core.embeddings import embed_text
 from app.core.llm import ToolSpec
 from app.core.search import hybrid_search
+from app.db.models import File
 
 SEARCH_CODE_TOOL_SPEC = ToolSpec(
     name="search_code",
     description=(
         "Search the repository's code for content relevant to a natural-language "
         "query. Returns ranked code chunks with file path, symbol name, and line "
-        "range. Always use this before answering questions about specific code."
+        "range. Best for finding code related to a topic or keyword when you "
+        "don't already know which file it's in."
     ),
     parameters={
         "type": "object",
@@ -20,6 +23,51 @@ SEARCH_CODE_TOOL_SPEC = ToolSpec(
         "required": ["query"],
     },
 )
+
+LIST_DIRECTORY_TOOL_SPEC = ToolSpec(
+    name="list_directory",
+    description=(
+        "List the files and subdirectories directly inside a directory of this "
+        "repository (not recursive -- subdirectories are shown but not expanded). "
+        "Pass an empty string for the repository root. Use this first for broad "
+        "questions like 'explain the architecture' to see the overall layout "
+        "before deciding what to read or search for."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Directory path relative to the repo root, or empty string for the root",
+            }
+        },
+        "required": [],
+    },
+)
+
+READ_FILE_TOOL_SPEC = ToolSpec(
+    name="read_file",
+    description=(
+        "Read the full contents of one specific file in this repository, given "
+        "its exact path (as seen in search_code results or list_directory "
+        "output). Use this when you need the complete picture of a file -- e.g. "
+        "a config/manifest file, or a source file where a chunked search_code "
+        "snippet isn't enough context."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "Exact file path relative to the repo root"}},
+        "required": ["path"],
+    },
+)
+
+ALL_TOOL_SPECS = [SEARCH_CODE_TOOL_SPEC, LIST_DIRECTORY_TOOL_SPEC, READ_FILE_TOOL_SPEC]
+
+# A single read_file call returning the model's entire remaining context
+# budget would be self-defeating -- this is generous for one file (roughly
+# 5k tokens) while leaving real room for conversation history, other tool
+# results, and the response itself.
+MAX_READ_FILE_CHARS = 20_000
 
 
 async def search_code(db: AsyncSession, repo_id: UUID, query: str, limit: int = 5) -> str:
@@ -33,3 +81,46 @@ async def search_code(db: AsyncSession, repo_id: UUID, query: str, limit: int = 
         symbol = f" ({r.symbol_name})" if r.symbol_name else ""
         blocks.append(f"### {r.file_path}:{r.start_line}-{r.end_line}{symbol}\n```\n{r.content}\n```")
     return "\n\n".join(blocks)
+
+
+async def list_directory(db: AsyncSession, repo_id: UUID, path: str = "") -> str:
+    result = await db.execute(select(File.path).where(File.repo_id == repo_id))
+    all_paths = result.scalars().all()
+
+    normalized = path.strip("/")
+    prefix = f"{normalized}/" if normalized else ""
+
+    # name -> whether it's a directory (any matching path has more path
+    # segments after it) vs a file (a path ends exactly there).
+    entries: dict[str, bool] = {}
+    prefix_matched = False
+    for p in all_paths:
+        if not p.startswith(prefix):
+            continue
+        prefix_matched = True
+        remainder = p[len(prefix):]
+        if not remainder:
+            continue
+        first_segment, _, rest = remainder.partition("/")
+        entries[first_segment] = entries.get(first_segment, False) or bool(rest)
+
+    if not entries:
+        if normalized and not prefix_matched:
+            return f"No such directory: {path!r}. Use search_code or the repository root (empty path) to find valid paths."
+        return "This directory is empty."
+
+    return "\n".join(f"{name}/" if is_dir else name for name, is_dir in sorted(entries.items()))
+
+
+async def read_file(db: AsyncSession, repo_id: UUID, path: str) -> str:
+    result = await db.execute(select(File).where(File.repo_id == repo_id, File.path == path))
+    file = result.scalar_one_or_none()
+    if file is None:
+        return f"No such file: {path!r}. Use list_directory or search_code to find the correct path."
+
+    content = file.content
+    if len(content) > MAX_READ_FILE_CHARS:
+        omitted = len(content) - MAX_READ_FILE_CHARS
+        content = content[:MAX_READ_FILE_CHARS] + f"\n... (truncated, {omitted} more characters not shown)"
+
+    return f"### {path}\n```\n{content}\n```"
