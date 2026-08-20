@@ -33,6 +33,24 @@ describe("SubmitRepoForm", () => {
     });
   });
 
+  it("does not clear the URL after a successful submit (it lives in a persistent layout header)", async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ repo_id: "r1", job_id: "j1" }),
+    });
+
+    render(<SubmitRepoForm />);
+    const input = screen.getByLabelText("GitHub repository URL") as HTMLInputElement;
+    await userEvent.type(input, "https://github.com/octocat/Hello-World");
+    await userEvent.click(screen.getByRole("button", { name: /analyze/i }));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalled();
+    });
+
+    expect(input.value).toBe("https://github.com/octocat/Hello-World");
+  });
+
   it("shows the backend's error message on failure", async () => {
     (global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: false,

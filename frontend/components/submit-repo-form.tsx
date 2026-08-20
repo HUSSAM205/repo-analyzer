@@ -37,7 +37,11 @@ export function SubmitRepoForm({ compact = false }: { compact?: boolean } = {}) 
         return;
       }
       const data = (await res.json()) as AnalyzeRepoResponse;
-      setUrl("");
+      // Deliberately not clearing `url` here: SubmitRepoForm lives in
+      // AppHeader, a layout-level component that persists across the
+      // client-side navigation below, so clearing it would flash the input
+      // empty before the new page even renders. Leaving it populated means
+      // the URL just stays visible -- the user can still clear it manually.
       setSubmitting(false);
       router.refresh();
       router.push(`/repos/${data.repo_id}?job=${data.job_id}`);
