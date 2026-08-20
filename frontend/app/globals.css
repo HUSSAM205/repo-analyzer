@@ -46,6 +46,19 @@
   .elevated-ring {
     @apply ring-1 ring-zinc-700/50 shadow-sm;
   }
+  /*
+   * Subtle glow for pill-style accents (tech-stack badges, quick-prompt
+   * pills, the primary-field badge, etc). Uses the app's existing
+   * `--primary` token rather than a new color, and stays low-opacity so it
+   * reads as a soft halo, not a neon effect.
+   */
+  .glow-pill {
+    @apply ring-1 ring-inset ring-primary/25 transition-shadow duration-200;
+    box-shadow: 0 0 10px -2px hsl(var(--primary) / 0.45);
+  }
+  .glow-pill:hover {
+    box-shadow: 0 0 14px -2px hsl(var(--primary) / 0.6);
+  }
 }
 
 /*

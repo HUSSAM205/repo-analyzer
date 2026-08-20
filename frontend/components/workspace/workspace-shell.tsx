@@ -70,7 +70,7 @@ export function WorkspaceShell({
             animate={{ width: 280, opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
             transition={{ duration: 0.2, ease: "easeInOut" }}
-            className="shrink-0 overflow-hidden border-r border-border"
+            className="shrink-0 overflow-hidden border-r border-zinc-800/60 bg-white/[0.03] backdrop-blur-xl"
           >
             <div className="h-full w-[280px] overflow-y-auto scrollbar-thin">{left}</div>
           </motion.aside>
@@ -99,7 +99,7 @@ export function WorkspaceShell({
             animate={{ width: 380, opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
             transition={{ duration: 0.2, ease: "easeInOut" }}
-            className="shrink-0 overflow-hidden border-l border-border"
+            className="shrink-0 overflow-hidden border-l border-zinc-800/60 bg-white/[0.03] backdrop-blur-xl"
           >
             <div className="h-full w-[380px]">{right}</div>
           </motion.aside>

@@ -27,7 +27,7 @@ export function RepoBriefing({ briefing }: { briefing: DomainBriefing | null | u
   const badges = briefing.tech_stack_badges ?? [];
 
   return (
-    <section className="border-b border-zinc-800/60 px-4 py-3">
+    <section className="glass border-b border-zinc-800/60 px-4 py-3">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -36,7 +36,7 @@ export function RepoBriefing({ briefing }: { briefing: DomainBriefing | null | u
         className="flex w-full items-center justify-between gap-3 text-left"
       >
         <div className="flex min-w-0 items-center gap-2">
-          <span className="shrink-0 rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold tracking-wide text-primary">
+          <span className="glow-pill shrink-0 rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold tracking-wide text-primary">
             {briefing.primary_field}
           </span>
           {!expanded && (
@@ -67,7 +67,7 @@ export function RepoBriefing({ briefing }: { briefing: DomainBriefing | null | u
                   {badges.map((badge) => (
                     <span
                       key={badge}
-                      className="rounded-full border border-zinc-800/60 px-3 py-1.5 text-xs text-zinc-300"
+                      className="glow-pill rounded-full border border-zinc-800/60 px-3 py-1.5 text-xs text-zinc-300"
                     >
                       {badge}
                     </span>

@@ -256,7 +256,7 @@ export function ChatPanel({
                         key={prompt}
                         type="button"
                         onClick={() => handleSend(prompt)}
-                        className="rounded-full border border-zinc-800/60 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:border-zinc-700/50 hover:text-zinc-100"
+                        className="glow-pill rounded-full border border-zinc-800/60 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:border-zinc-700/50 hover:text-zinc-100"
                       >
                         {prompt}
                       </button>
