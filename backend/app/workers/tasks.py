@@ -115,6 +115,26 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
             if repo is not None:
                 repo.status = RepoStatus.FAILED
             await db.commit()
+        except asyncio.CancelledError:
+            # ARQ's job_timeout (WorkerSettings) enforces its deadline by
+            # cancelling this coroutine's task -- asyncio.CancelledError
+            # inherits from BaseException, not Exception, so it is NOT
+            # caught by `except Exception` below and would otherwise blow
+            # straight past every status update in this function, leaving
+            # the job/repo stuck at RUNNING forever (confirmed live: a
+            # slow embedding step on a real repo hit exactly this path).
+            # Mark both terminal FAILED here, then re-raise -- swallowing a
+            # CancelledError without propagating it violates asyncio's
+            # cancellation contract and can leave the task/event loop in an
+            # inconsistent state.
+            await db.rollback()
+            job.status = JobStatus.FAILED
+            job.error_message = "Analysis timed out"
+            job.finished_at = datetime.now(timezone.utc)
+            if repo is not None:
+                repo.status = RepoStatus.FAILED
+            await db.commit()
+            raise
         except Exception as exc:
             await db.rollback()
             job.status = JobStatus.FAILED

@@ -402,3 +402,82 @@ async def test_analyze_repo_task_marks_failed_when_running_transition_fails(monk
         refreshed_user = await db.get(User, user_id)
         await db.delete(refreshed_user)
         await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_analyze_repo_task_marks_failed_on_cancellation(monkeypatch):
+    # Confirmed live: ARQ's job_timeout (WorkerSettings) enforces its
+    # deadline by cancelling analyze_repo's task. asyncio.CancelledError
+    # inherits from BaseException, not Exception -- so it silently skipped
+    # every `except Exception` block below and left a real job/repo stuck
+    # at RUNNING/embedding forever on a slow real analysis. Simulate the
+    # same failure mode by having embed_chunks raise CancelledError (the
+    # same exception type to_thread would propagate from a cancelled
+    # worker task) and confirm it's now caught, both rows are marked
+    # FAILED, and -- critically -- the CancelledError still propagates
+    # (asyncio's cancellation contract requires this; swallowing it here
+    # would be its own bug).
+    import asyncio
+
+    from app.workers import tasks as tasks_module
+
+    async with async_session_maker() as db:
+        user = User(email=f"worker-{uuid.uuid4()}@example.com", hashed_password="hashed")
+        db.add(user)
+        await db.flush()
+
+        repo = Repo(
+            user_id=user.id, url="https://example.com/fake/cancelled-repo", name="cancelled-repo",
+            status=RepoStatus.PENDING,
+        )
+        db.add(repo)
+        await db.flush()
+
+        job = Job(repo_id=repo.id, status=JobStatus.PENDING)
+        db.add(job)
+        await db.commit()
+        job_id = str(job.id)
+        repo_id = repo.id
+        user_id = user.id
+
+    def fake_clone_repo(url, dest_dir, max_size_mb, timeout_seconds):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        return dest_dir
+
+    def fake_walk_and_chunk(root_dir, max_files):
+        from app.core.chunker import Chunk
+        from app.core.ingestion import WalkedFile, WalkResult
+
+        return WalkResult(
+            chunks=[Chunk(
+                file_path="main.py", symbol_name="greet", node_type="function", start_line=1, end_line=2,
+                content="def greet(): pass",
+            )],
+            files=[WalkedFile(path="main.py", content="def greet(): pass")],
+            files_processed=1, files_skipped=0,
+        )
+
+    def fake_embed_chunks(chunks, batch_size=8):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(tasks_module, "clone_repo", fake_clone_repo)
+    monkeypatch.setattr(tasks_module, "walk_and_chunk", fake_walk_and_chunk)
+    monkeypatch.setattr(tasks_module, "embed_chunks", fake_embed_chunks)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await analyze_repo({}, job_id)
+    finally:
+        monkeypatch.undo()
+
+    async with async_session_maker() as db:
+        refreshed_job = await db.get(Job, uuid.UUID(job_id))
+        assert refreshed_job.status == JobStatus.FAILED
+        assert refreshed_job.error_message == "Analysis timed out"
+        refreshed_repo = await db.get(Repo, repo_id)
+        assert refreshed_repo.status == RepoStatus.FAILED
+
+        await db.delete(refreshed_job)
+        await db.delete(refreshed_repo)
+        refreshed_user = await db.get(User, user_id)
+        await db.delete(refreshed_user)
+        await db.commit()
