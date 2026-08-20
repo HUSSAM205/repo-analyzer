@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -430,3 +431,102 @@ async def test_openai_client_sanitizes_provider_exception():
     assert events[0].type == "error"
     assert events[0].error is not None
     assert _SECRET_MARKER not in events[0].error
+
+
+@pytest.mark.asyncio
+async def test_groq_client_retries_stream_connect_and_succeeds(monkeypatch):
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    # Shrink the real backoff delays so this test doesn't add real wall-clock
+    # time -- the retry *logic* is what's under test, not the actual delay.
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(api_key="test-key", model="test-model")
+    attempts = {"n": 0}
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk("hi")
+
+    async def flaky_create(*args, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise RuntimeError("transient connect failure")
+        return fake_stream()
+
+    client._client.chat.completions.create = flaky_create
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert attempts["n"] == 3
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "hi"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_sanitizes_exception_after_exhausting_retries(monkeypatch):
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(api_key="test-key", model="test-model")
+    attempts = {"n": 0}
+
+    async def always_fails(*args, **kwargs):
+        attempts["n"] += 1
+        raise RuntimeError(_SECRET_MARKER)
+
+    client._client.chat.completions.create = always_fails
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert attempts["n"] == llm_providers_module._GROQ_MAX_ATTEMPTS
+    assert len(events) == 1
+    assert events[0].type == "error"
+    assert _SECRET_MARKER not in events[0].error
+
+
+@pytest.mark.asyncio
+async def test_groq_client_bounds_each_connect_attempt_by_its_own_timeout(monkeypatch):
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    # Shrink both the per-attempt timeout and the backoff so a hung connect
+    # attempt is proven bounded without the test itself taking ~15s+.
+    monkeypatch.setattr(llm_providers_module, "_GROQ_CONNECT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+    monkeypatch.setattr(llm_providers_module, "_GROQ_MAX_ATTEMPTS", 1)
+
+    client = GroqClient(api_key="test-key", model="test-model")
+
+    async def hangs_forever(*args, **kwargs):
+        await asyncio.sleep(10)
+
+    client._client.chat.completions.create = hangs_forever
+
+    start = asyncio.get_event_loop().time()
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+    elapsed = asyncio.get_event_loop().time() - start
+
+    assert elapsed < 5  # bounded by the 0.05s timeout, nowhere near the real 10s hang
+    assert events[-1].type == "error"

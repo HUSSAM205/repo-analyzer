@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -33,6 +34,15 @@ _FALLBACK_PROVIDER_ORDER = ("anthropic", "openai", "gemini", "groq")
 # request/response/tool-call shapes) -- it's served through the openai SDK
 # pointed at Groq's base_url rather than a separate SDK/dependency.
 _GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+
+# Retry/backoff/timeout policy for establishing a Groq stream specifically
+# (not the other providers -- Groq is the one seeing transient connect
+# failures in practice). 3 attempts total, each capped at 15s, with 1s/2s
+# exponential backoff between attempts -- bounded at roughly 15s+1s+15s+2s+15s
+# = ~48s worst case before falling back to the standard clean error event.
+_GROQ_CONNECT_TIMEOUT_SECONDS = 15.0
+_GROQ_MAX_ATTEMPTS = 3
+_GROQ_BACKOFF_BASE_SECONDS = 1.0
 
 
 def _to_anthropic_messages(messages: list[Message]) -> list[dict]:
@@ -131,6 +141,17 @@ class OpenAIClient:
         self._client = AsyncOpenAI(api_key=api_key, timeout=_CLIENT_TIMEOUT_SECONDS)
         self._model = model
 
+    # Split out so a subclass (see GroqClient below) can wrap just the
+    # stream-establishment step in its own retry/backoff/timeout policy,
+    # without duplicating the token-consumption loop below. This step is
+    # the only safe place to retry: once the caller starts iterating the
+    # returned stream, some tokens may already be on their way to the user
+    # -- retrying at that point would risk yielding duplicated output.
+    async def _get_stream(self, openai_messages: list[dict], openai_tools: list[dict]):
+        return await self._client.chat.completions.create(
+            model=self._model, messages=openai_messages, tools=openai_tools, stream=True,
+        )
+
     async def stream_chat(
         self, messages: list[Message], tools: list[ToolSpec], system_prompt: str
     ) -> AsyncIterator[LLMEvent]:
@@ -141,9 +162,7 @@ class OpenAIClient:
         ]
 
         try:
-            stream = await self._client.chat.completions.create(
-                model=self._model, messages=openai_messages, tools=openai_tools, stream=True,
-            )
+            stream = await self._get_stream(openai_messages, openai_tools)
 
             content_parts: list[str] = []
             tool_call_accumulator: dict[int, dict] = {}
@@ -187,6 +206,31 @@ class GroqClient(OpenAIClient):
         # client construction and inherits stream_chat unchanged.
         self._client = AsyncOpenAI(api_key=api_key, base_url=_GROQ_BASE_URL, timeout=_CLIENT_TIMEOUT_SECONDS)
         self._model = model
+
+    async def _get_stream(self, openai_messages: list[dict], openai_tools: list[dict]):
+        # Retries only the stream-establishment call (see the base class'
+        # _get_stream docstring for why that's the only safe point) with
+        # exponential backoff, each attempt bounded by its own 15s cap so a
+        # hung connection attempt can't silently eat the whole request
+        # budget across retries.
+        last_exc: Exception | None = None
+        for attempt in range(_GROQ_MAX_ATTEMPTS):
+            if attempt > 0:
+                backoff = _GROQ_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+                logger.warning(
+                    "GroqClient: retrying stream connect (attempt %d/%d, model=%s) after %.1fs backoff",
+                    attempt + 1, _GROQ_MAX_ATTEMPTS, self._model, backoff,
+                )
+                await asyncio.sleep(backoff)
+            try:
+                return await asyncio.wait_for(
+                    super()._get_stream(openai_messages, openai_tools),
+                    timeout=_GROQ_CONNECT_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                last_exc = exc
+        assert last_exc is not None
+        raise last_exc
 
 
 def _to_gemini_contents(
