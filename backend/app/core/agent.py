@@ -34,7 +34,12 @@ SYSTEM_PROMPT = (
     "information to answer confidently, say so rather than speculating."
 )
 
-MAX_TOOL_ITERATIONS = 5
+# 5 was too tight for the more deliberate, multi-step search style of the
+# model that turned out most reliable for this workload (qwen/qwen3.6-27b,
+# see llm_providers.py/config.py) -- confirmed live, it was still issuing
+# well-formed, evolving queries and finding real content when it hit the
+# old cap, cut off before it could synthesize a final answer.
+MAX_TOOL_ITERATIONS = 8
 
 SearchFn = Callable[[str], Awaitable[str]]
 

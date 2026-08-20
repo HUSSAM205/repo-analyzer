@@ -46,11 +46,23 @@ class Settings(BaseSettings):
     # Verified live against GET https://api.groq.com/openai/v1/models: as of
     # this deployment, Groq's catalog no longer includes any Llama 3.x model
     # (llama-3.3-70b-versatile / llama-3.1-8b-instant both 404) -- they've
-    # been retired in favor of the openai/gpt-oss-* and qwen/* families.
-    # groq_model is the primary (verified working, tool-calling-capable);
-    # groq_fallback_model is used automatically if Groq ever retires this
-    # one too (see GroqClient._get_stream's NotFoundError handling).
-    groq_model: str = "openai/gpt-oss-120b"
+    # been retired in favor of the openai/gpt-oss-*/qwen/* families.
+    # Also verified live across repeated real multi-turn tool-calling chats:
+    # openai/gpt-oss-120b reliably (3/3 tries, on both trivial and
+    # real-content repos) had Groq reject a later-turn search_code call with
+    # a hard "Tool call validation failed: missing properties: 'query'"
+    # APIError -- a genuine model-side reliability issue with this specific
+    # model on Groq for this workload, not a formatting bug on our side
+    # (the tool schema and message serialization are both correct). Of the
+    # three real chat-capable models in Groq's current catalog,
+    # qwen/qwen3.6-27b was the only one that never hit that error and
+    # produced well-formed, evolving search queries with real content
+    # discovery -- promoted to primary. openai/gpt-oss-20b never hit the
+    # hard error either (though its search queries were weaker) and is kept
+    # as the automatic fallback if qwen is ever retired (see
+    # GroqClient._get_stream's NotFoundError handling) or misbehaves the
+    # same way -- gpt-oss-120b is deliberately no longer used by default.
+    groq_model: str = "qwen/qwen3.6-27b"
     groq_fallback_model: str | None = "openai/gpt-oss-20b"
 
 
