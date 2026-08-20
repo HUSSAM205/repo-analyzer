@@ -73,6 +73,12 @@ services:
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+    # Hard backstop on top of embedding_cpu_threads (app/config.py): even if
+    # a future change forgets to respect that setting, the container itself
+    # is capped so bulk embedding can no longer consume every host core and
+    # starve the api container sharing the same Docker Desktop VM. Leaves
+    # the rest of the stack (postgres/redis/api/frontend) real headroom.
+    cpus: "6"
     # Lets this container reach a server on the host machine via
     # "host.docker.internal" -- Docker Desktop (Windows/Mac) wires this up
     # automatically, but plain Docker Engine on Linux needs it declared

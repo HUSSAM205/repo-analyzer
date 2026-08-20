@@ -7,6 +7,13 @@ from app.config import get_settings
 
 settings = get_settings()
 
+# Must happen before any tensor ops run, and only once -- torch warns/no-ops
+# on a second call after the thread pools are already initialized. Both the
+# api container (search's query embedding) and the worker container (bulk
+# repo embedding) import this module, so this bounds both, not just the
+# worker's heavier bulk path.
+torch.set_num_threads(settings.embedding_cpu_threads)
+
 
 @lru_cache
 def _tokenizer():

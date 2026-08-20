@@ -17,6 +17,15 @@ class Settings(BaseSettings):
 
     embedding_model_name: str = "microsoft/codebert-base"
     embedding_dimension: int = 768
+    # PyTorch defaults to using every visible CPU core for intra-op
+    # parallelism. Uncapped, a single embedding batch pegs all cores on the
+    # host (confirmed live: 594% CPU sustained for minutes on a 12-core
+    # dev box), starving every other container sharing the same Docker
+    # Desktop VM -- including the api container, which is how a background
+    # analysis job turns into user-facing "server unavailable" errors on
+    # chat/annotation requests. Capped well below the host's core count so
+    # embedding always leaves real headroom for the rest of the stack.
+    embedding_cpu_threads: int = 4
 
     max_repo_size_mb: int = 500
     max_files_per_repo: int = 5000
