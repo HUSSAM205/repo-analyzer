@@ -57,7 +57,6 @@ export function SubmitRepoForm({ compact = false }: { compact?: boolean } = {}) 
         value={url}
         onChange={(e) => setUrl(e.target.value)}
         aria-label="GitHub repository URL"
-        className="focus-visible:elevated-ring"
       />
       <Button type="submit" disabled={submitting}>
         {submitting ? "Submitting..." : "Analyze"}
