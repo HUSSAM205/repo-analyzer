@@ -1,9 +1,36 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
+
+// Below this width the ~660px of combined fixed-width sidebar chrome
+// (280px + 380px) squeezes the center code-viewer pane to an unusable
+// width. Matches Tailwind's default "lg" breakpoint.
+const NARROW_BREAKPOINT_PX = 1024;
+
+// Plain `window.innerWidth` + a "resize" listener rather than
+// `matchMedia`: jsdom (this project's Jest test environment) doesn't
+// implement `matchMedia` at all, while `window.innerWidth` and dispatched
+// "resize" events work out of the box there, so this stays testable
+// without adding a jsdom polyfill.
+function useIsNarrowViewport(breakpointPx: number): boolean {
+  const [isNarrow, setIsNarrow] = useState(
+    () => typeof window !== "undefined" && window.innerWidth < breakpointPx
+  );
+
+  useEffect(() => {
+    function handleResize() {
+      setIsNarrow(window.innerWidth < breakpointPx);
+    }
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [breakpointPx]);
+
+  return isNarrow;
+}
 
 export function WorkspaceShell({
   left,
@@ -16,6 +43,22 @@ export function WorkspaceShell({
 }) {
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
+
+  const isNarrow = useIsNarrowViewport(NARROW_BREAKPOINT_PX);
+
+  // Auto-collapse the chat panel (the right sidebar) the moment the
+  // viewport crosses below the breakpoint, without fighting the manual
+  // toggle buttons afterward: this only forces the closed state once per
+  // narrow-entry transition (including an initial mount that's already
+  // narrow), so a user who manually reopens it back stays open until the
+  // viewport widens past the breakpoint and narrows again.
+  const wasNarrowRef = useRef(false);
+  useEffect(() => {
+    if (isNarrow && !wasNarrowRef.current) {
+      setRightOpen(false);
+    }
+    wasNarrowRef.current = isNarrow;
+  }, [isNarrow]);
 
   return (
     <div className="flex min-h-0 w-full flex-1 overflow-hidden">
