@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Annotated
 
@@ -9,8 +10,14 @@ from app.config import get_settings
 from app.db.models import User
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 _redis_client: redis.Redis | None = None
+
+# A Redis blip -- not a refused connection, but a hang -- must not be able to
+# stall every /repos/analyze or /conversations/{id}/messages request behind
+# it forever, so both the socket and the eval call below are bounded.
+_REDIS_SOCKET_TIMEOUT_SECONDS = 3
 
 _TOKEN_BUCKET_LUA = """
 local key = KEYS[1]
@@ -47,14 +54,28 @@ return allowed
 def get_redis_client() -> redis.Redis:
     global _redis_client
     if _redis_client is None:
-        _redis_client = redis.from_url(settings.redis_url, decode_responses=True)
+        _redis_client = redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_timeout=_REDIS_SOCKET_TIMEOUT_SECONDS,
+            socket_connect_timeout=_REDIS_SOCKET_TIMEOUT_SECONDS,
+        )
     return _redis_client
 
 
 async def check_token_bucket(key: str, capacity: int, refill_per_minute: int) -> bool:
     client = get_redis_client()
     refill_per_sec = refill_per_minute / 60.0
-    allowed = await client.eval(_TOKEN_BUCKET_LUA, 1, key, capacity, refill_per_sec, time.time(), 1)
+    try:
+        allowed = await client.eval(_TOKEN_BUCKET_LUA, 1, key, capacity, refill_per_sec, time.time(), 1)
+    except redis.RedisError:
+        # Fail OPEN, not closed: rate limiting is a traffic-shaping safety
+        # net, not an auth/authz control, so a Redis outage/blip should
+        # degrade to "unlimited" rather than take down every gated endpoint
+        # (POST /repos/analyze, POST /conversations/{id}/messages) for all
+        # users. Logged as a warning so the outage is still visible.
+        logger.warning("Redis rate-limit check failed for key=%s; failing open", key, exc_info=True)
+        return True
     return bool(allowed)
 
 
