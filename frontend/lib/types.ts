@@ -19,6 +19,13 @@ export interface Repo {
   name: string;
   status: "pending" | "ready" | "failed";
   created_at: string;
+  // Added by the backend so a failure reason (and progress) is visible on a
+  // reload/bookmark/shared link that has no `?job=` query param -- the
+  // in-flight `useJobPolling` job only exists right after submission, when
+  // the URL still carries that param. Optional/nullable because this field
+  // may not exist yet on responses from a not-yet-updated backend deploy;
+  // treat it defensively (it may be `undefined` as well as `null`).
+  latest_job?: Job | null;
 }
 
 export interface Job {

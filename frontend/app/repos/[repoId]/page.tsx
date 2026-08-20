@@ -19,7 +19,7 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
   // FileTree (re-fetch trigger) so the same analysis job is only polled
   // once per page instead of each child running its own independent poll
   // of GET /api/jobs/{id}.
-  const { job, polling } = useJobPolling(jobId);
+  const { job, polling, pollingFailed } = useJobPolling(jobId);
 
   const [repo, setRepo] = useState<Repo | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
@@ -64,7 +64,7 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
 
   return (
     <>
-      <RepoHeader repo={repo} job={job} polling={polling} />
+      <RepoHeader repo={repo} job={job} polling={polling} pollingFailed={pollingFailed} />
       <WorkspaceShell
         left={<FileTree repoId={params.repoId} polling={polling} selectedPath={selectedPath} onSelectFile={setSelectedPath} />}
         center={<CodeViewer repoId={params.repoId} path={selectedPath} />}
