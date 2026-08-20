@@ -130,6 +130,17 @@ class CodeChunk(Base):
     __table_args__ = (
         Index("ix_code_chunks_repo_id", "repo_id"),
         Index("ix_code_chunks_content_tsv", "content_tsv", postgresql_using="gin"),
+        # Matches the raw-SQL index created in
+        # alembic/versions/0001_initial_schema.py (no new migration needed --
+        # this only brings the ORM metadata in line with the schema that
+        # already exists in the DB).
+        Index(
+            "ix_code_chunks_embedding",
+            "embedding",
+            postgresql_using="ivfflat",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"lists": "100"},
+        ),
     )
 
 
