@@ -37,10 +37,17 @@ _GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 # Retry/backoff/timeout policy for establishing a Groq stream specifically
 # (not the other providers -- Groq is the one seeing transient connect
-# failures in practice). 3 attempts total, each capped at 15s, with 1s/2s
-# exponential backoff between attempts -- bounded at roughly 15s+1s+15s+2s+15s
-# = ~48s worst case before falling back to the standard clean error event.
-_GROQ_CONNECT_TIMEOUT_SECONDS = 15.0
+# failures in practice). Bumped from 15s to 25s after the repo-browsing
+# tools (list_directory/read_file) started sending full file contents back
+# as tool results -- a turn with several read_file calls in history is a
+# meaningfully larger prompt than a search_code-only conversation, and 15s
+# genuinely wasn't always enough for Groq to start streaming back (observed
+# live: a real TimeoutError on a 5-tool-call conversation that succeeded
+# cleanly on a fresh retry with the same content). 3 attempts total, with
+# 1s/2s exponential backoff between them -- bounded at roughly
+# 25s+1s+25s+2s+25s = ~78s worst case before falling back to the standard
+# clean error event.
+_GROQ_CONNECT_TIMEOUT_SECONDS = 25.0
 _GROQ_MAX_ATTEMPTS = 3
 _GROQ_BACKOFF_BASE_SECONDS = 1.0
 
