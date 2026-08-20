@@ -161,6 +161,13 @@ class File(Base):
     path: Mapped[str] = mapped_column(String(1000), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    # Cached per-file "Annotated View" code-block annotations produced by
+    # app.core.code_annotation.generate_code_annotations the first time a
+    # user opens Annotated View for this file -- see app/schemas/files.py's
+    # CodeBlockAnnotation for the shape of each element. Left None until
+    # generated; a failed generation attempt is never cached (left None so a
+    # later retry can succeed).
+    annotations: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     repo: Mapped["Repo"] = relationship(back_populates="files")
 
