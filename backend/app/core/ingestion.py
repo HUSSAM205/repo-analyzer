@@ -13,6 +13,23 @@ EXCLUDED_DIR_PATTERNS = {
 }
 MAX_FILE_SIZE_BYTES = 1_000_000
 
+# Extension-based skip for common binary asset types. Checked before
+# attempting path.read_text() -- previously these were only caught
+# indirectly via UnicodeDecodeError after a failed read attempt (or the size
+# cap, for large ones), which wastes a read syscall and a decode attempt on
+# every one of these files in a repo that often has plenty of them (images,
+# fonts, bundled media).
+_BINARY_EXTENSIONS = {
+    # Images
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp", ".bmp",
+    # Fonts
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    # Media
+    ".mp4", ".mov", ".mp3", ".wav",
+    # Archives / binaries
+    ".zip", ".tar", ".gz", ".exe", ".dll", ".so", ".bin", ".pdf", ".class", ".jar", ".pyc",
+}
+
 
 @dataclass
 class ChunkWithEmbedding:
@@ -87,6 +104,10 @@ def _should_skip_dir(dir_name: str) -> bool:
     return dir_name in EXCLUDED_DIR_PATTERNS or dir_name.startswith(".")
 
 
+def _is_likely_binary(path: Path) -> bool:
+    return path.suffix.lower() in _BINARY_EXTENSIONS
+
+
 def walk_and_chunk(root_dir: Path, max_files: int) -> WalkResult:
     all_chunks: list[Chunk] = []
     all_files: list[WalkedFile] = []
@@ -119,6 +140,10 @@ def walk_and_chunk(root_dir: Path, max_files: int) -> WalkResult:
                 files_skipped += 1
                 continue
         except OSError:
+            files_skipped += 1
+            continue
+
+        if _is_likely_binary(path):
             files_skipped += 1
             continue
 

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core.ingestion import ingest_local_directory, walk_and_chunk
+from app.core.ingestion import _is_likely_binary, ingest_local_directory, walk_and_chunk
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "sample_repo"
 
@@ -113,6 +113,35 @@ def test_walk_and_chunk_skips_symlink_via_monkeypatch(tmp_path, monkeypatch):
     assert result.files_processed == 2
     assert result.files_skipped == 1
     assert not any(f.path == "main.py" for f in result.files)
+
+
+def test_is_likely_binary_detects_common_asset_extensions():
+    assert _is_likely_binary(Path("logo.png"))
+    assert _is_likely_binary(Path("assets/font.woff2"))
+    assert _is_likely_binary(Path("clip.mp4"))
+    assert _is_likely_binary(Path("archive.tar"))
+    assert _is_likely_binary(Path("SOMETHING.PDF"))  # case-insensitive
+    assert not _is_likely_binary(Path("main.py"))
+    assert not _is_likely_binary(Path("README.md"))
+    assert not _is_likely_binary(Path("no_extension"))
+
+
+def test_walk_and_chunk_skips_binary_files_before_reading_them(tmp_path):
+    repo_dir = tmp_path / "repo_with_binary"
+    shutil.copytree(FIXTURE_DIR, repo_dir)
+
+    # Bytes that would raise UnicodeDecodeError if actually read as UTF-8 --
+    # proves the file is skipped by extension, not by falling through to the
+    # existing UnicodeDecodeError handling.
+    (repo_dir / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00\x01binarydata")
+    (repo_dir / "bundle.zip").write_bytes(b"PK\x03\x04\xff\xfe\x00\x01")
+
+    result = walk_and_chunk(repo_dir, max_files=100)
+
+    assert result.files_processed == 3  # only the 3 legitimate fixture files
+    assert result.files_skipped == 2
+    assert not any(f.path in ("logo.png", "bundle.zip") for f in result.files)
+    assert not any(c.file_path in ("logo.png", "bundle.zip") for c in result.chunks)
 
 
 @pytest.mark.slow
