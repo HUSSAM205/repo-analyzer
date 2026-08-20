@@ -80,12 +80,23 @@ export function ChatPanel({ repoId }: { repoId: string }) {
   }
 
   useEffect(() => {
+    let cancelled = false;
     apiFetch(`/api/repos/${repoId}/conversations`, { cache: "no-store" })
-      .then((res) => (res.ok ? (res.json() as Promise<Conversation[]>) : []))
+      .then((res) => {
+        if (!res.ok) throw new Error("Failed to load conversations");
+        return res.json() as Promise<Conversation[]>;
+      })
       .then((data) => {
+        if (cancelled) return;
         setConversations(data);
         if (data.length > 0) setActiveId(data[0].id);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Could not load conversations. Please refresh the page.");
       });
+    return () => {
+      cancelled = true;
+    };
   }, [repoId]);
 
   useEffect(() => {
@@ -105,15 +116,23 @@ export function ChatPanel({ repoId }: { repoId: string }) {
   }, [messages, streamingText, autoScroll]);
 
   async function handleCreate() {
-    const res = await apiFetch(`/api/repos/${repoId}/conversations`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "New conversation" }),
-    });
-    if (!res.ok) return;
-    const conversation = (await res.json()) as Conversation;
-    setConversations((prev) => [conversation, ...prev]);
-    setActiveId(conversation.id);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/repos/${repoId}/conversations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "New conversation" }),
+      });
+      if (!res.ok) {
+        setError("Could not start a new conversation. Please try again.");
+        return;
+      }
+      const conversation = (await res.json()) as Conversation;
+      setConversations((prev) => [conversation, ...prev]);
+      setActiveId(conversation.id);
+    } catch {
+      setError("Could not start a new conversation. Please try again.");
+    }
   }
 
   async function handleSend(content: string) {

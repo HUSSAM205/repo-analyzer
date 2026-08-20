@@ -264,6 +264,71 @@ describe("ChatPanel quick prompts and streaming cursor", () => {
   });
 });
 
+describe("ChatPanel error handling", () => {
+  it("surfaces an error via the same error UI as handleSend when the conversations list fetch fails", async () => {
+    // Before the fix, this effect had no .catch() at all -- a network
+    // failure here left an unhandled promise rejection and no visible
+    // signal to the user that anything went wrong.
+    global.fetch = jest.fn().mockRejectedValue(new TypeError("Failed to fetch")) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    expect(await screen.findByText("Could not load conversations. Please refresh the page.")).toBeInTheDocument();
+  });
+
+  it("surfaces an error via the same error UI as handleSend when the conversations list fetch returns non-ok", async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({}) }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    expect(await screen.findByText("Could not load conversations. Please refresh the page.")).toBeInTheDocument();
+  });
+
+  it("surfaces an error instead of silently doing nothing when creating a new conversation fails", async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/repos/repo-1/conversations" && method === "POST") {
+        return Promise.resolve({ ok: false, json: async () => ({ detail: "nope" }) } as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const createButton = await screen.findByRole("button", { name: /new conversation/i });
+    await userEvent.click(createButton);
+
+    expect(await screen.findByText("Could not start a new conversation. Please try again.")).toBeInTheDocument();
+  });
+
+  it("surfaces an error when creating a new conversation throws (network failure)", async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/repos/repo-1/conversations" && method === "POST") {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const createButton = await screen.findByRole("button", { name: /new conversation/i });
+    await userEvent.click(createButton);
+
+    expect(await screen.findByText("Could not start a new conversation. Please try again.")).toBeInTheDocument();
+  });
+});
+
 describe("ChatPanel auto-scroll", () => {
   function mockScrollMetrics(
     el: Element,
