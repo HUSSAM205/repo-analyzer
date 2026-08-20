@@ -1,3 +1,4 @@
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,8 +51,28 @@ class CloneError(Exception):
 
 
 def clone_repo(url: str, dest_dir: Path, max_size_mb: int, timeout_seconds: int) -> Path:
+    # GitPython's kill_after_timeout is unconditionally unsupported on
+    # Windows: passing any non-None value makes Git.execute() raise
+    # GitCommandError immediately, before the clone even starts (see
+    # git/cmd.py's `sys.platform == "win32"` guard). This service deploys on
+    # Linux, where the flag works as intended, so it's only omitted on
+    # win32 to keep local dev/test clones (and CI running on Windows
+    # runners, if any) functional.
+    clone_kwargs = {} if sys.platform == "win32" else {"kill_after_timeout": timeout_seconds}
     try:
-        git.Repo.clone_from(url, dest_dir, depth=1, single_branch=True)
+        git.Repo.clone_from(
+            url,
+            dest_dir,
+            depth=1,
+            single_branch=True,
+            # Without this, a private/misauthenticated repo makes git prompt
+            # interactively for credentials -- a prompt nothing can ever
+            # answer in a background worker, hanging the clone indefinitely
+            # regardless of kill_after_timeout racing it. Disabling the
+            # prompt makes auth failures fail fast as a normal GitCommandError.
+            env={"GIT_TERMINAL_PROMPT": "0"},
+            **clone_kwargs,
+        )
     except git.GitCommandError as exc:
         raise CloneError(f"Failed to clone {url}: {exc}") from exc
 
