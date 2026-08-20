@@ -77,6 +77,26 @@ export interface FileContentResponse {
   content: string;
 }
 
+// AI-generated per-block annotations for a file, shown by the Annotated
+// View toggle in CodeViewer. See
+// app/api/repos/[repoId]/files/annotations/route.ts and
+// components/workspace/code-viewer.tsx. `category` is a closed set that
+// must match the backend contract exactly -- a mismatch here would break
+// rendering on real data.
+export interface CodeBlockAnnotation {
+  category: "imports" | "config_state" | "business_logic" | "handlers_endpoints";
+  start_line: number; // 1-indexed, inclusive
+  end_line: number; // 1-indexed, inclusive
+  logic_summary: string;
+  flow: string;
+  tips: string;
+}
+
+export interface FileAnnotationsResponse {
+  path: string;
+  blocks: CodeBlockAnnotation[];
+}
+
 export interface Conversation {
   id: string;
   repo_id: string;
