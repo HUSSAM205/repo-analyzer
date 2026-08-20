@@ -27,7 +27,12 @@ _CLIENT_TIMEOUT_SECONDS = 60.0
 
 # Fixed priority order used both for "which provider did the operator pick"
 # (settings.llm_provider) and for get_llm_client()'s fallback below.
-_FALLBACK_PROVIDER_ORDER = ("anthropic", "openai", "gemini")
+_FALLBACK_PROVIDER_ORDER = ("anthropic", "openai", "gemini", "groq")
+
+# Groq's API is wire-compatible with OpenAI's chat-completions format (same
+# request/response/tool-call shapes) -- it's served through the openai SDK
+# pointed at Groq's base_url rather than a separate SDK/dependency.
+_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 
 def _to_anthropic_messages(messages: list[Message]) -> list[dict]:
@@ -173,6 +178,17 @@ class OpenAIClient:
             yield LLMEvent(type="error", error=_PROVIDER_ERROR_MESSAGE)
 
 
+class GroqClient(OpenAIClient):
+    def __init__(self, api_key: str, model: str):
+        # Deliberately does not call super().__init__(): that constructs an
+        # AsyncOpenAI client with no base_url override (real OpenAI). Groq
+        # needs its own base_url but the exact same message/tool-call
+        # translation and streaming logic, so this subclass only overrides
+        # client construction and inherits stream_chat unchanged.
+        self._client = AsyncOpenAI(api_key=api_key, base_url=_GROQ_BASE_URL, timeout=_CLIENT_TIMEOUT_SECONDS)
+        self._model = model
+
+
 def _to_gemini_contents(
     messages: list[Message], thought_signatures: dict[str, bytes] | None = None
 ) -> list[genai_types.Content]:
@@ -306,6 +322,8 @@ def _provider_api_key(current_settings, provider: str) -> str | None:
         return current_settings.openai_api_key
     if provider == "gemini":
         return current_settings.gemini_api_key
+    if provider == "groq":
+        return current_settings.groq_api_key
     return current_settings.anthropic_api_key
 
 
@@ -314,6 +332,8 @@ def _build_provider_client(current_settings, provider: str):
         return OpenAIClient(api_key=current_settings.openai_api_key, model=current_settings.openai_model)
     if provider == "gemini":
         return GeminiClient(api_key=current_settings.gemini_api_key, model=current_settings.gemini_model)
+    if provider == "groq":
+        return GroqClient(api_key=current_settings.groq_api_key, model=current_settings.groq_model)
     return AnthropicClient(api_key=current_settings.anthropic_api_key, model=current_settings.anthropic_model)
 
 
@@ -349,5 +369,5 @@ def get_llm_client():
 
     raise RuntimeError(
         "No LLM provider is configured -- set at least one of ANTHROPIC_API_KEY, "
-        "OPENAI_API_KEY, or GEMINI_API_KEY."
+        "OPENAI_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY."
     )

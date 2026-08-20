@@ -43,6 +43,8 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
     ports:
       - "8000:8000"
     volumes:
@@ -69,6 +71,8 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
     # Lets this container reach a server on the host machine via
     # "host.docker.internal" -- Docker Desktop (Windows/Mac) wires this up
     # automatically, but plain Docker Engine on Linux needs it declared

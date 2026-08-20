@@ -378,7 +378,7 @@ def test_get_llm_client_prefers_configured_provider_over_fallback(monkeypatch):
 
 
 def test_get_llm_client_raises_when_no_provider_configured(monkeypatch):
-    # Only when literally none of the three providers have a key set should
+    # Only when literally none of the four providers have a key set should
     # get_llm_client() raise.
     from app.core.llm_providers import get_llm_client
     from app.config import get_settings
@@ -387,6 +387,7 @@ def test_get_llm_client_raises_when_no_provider_configured(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("GROQ_API_KEY", "")
     get_settings.cache_clear()
     try:
         with pytest.raises(RuntimeError):

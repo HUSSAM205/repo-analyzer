@@ -26,13 +26,15 @@ class Settings(BaseSettings):
     rate_limit_bucket_capacity: int = 5
     rate_limit_chat_per_minute: int = 15
 
-    llm_provider: Literal["anthropic", "openai", "gemini", "fake"] = "anthropic"
+    llm_provider: Literal["anthropic", "openai", "gemini", "groq", "fake"] = "anthropic"
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-4-5-20250929"
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o"
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.7-flash"
+    groq_api_key: str | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
 
 
 @lru_cache

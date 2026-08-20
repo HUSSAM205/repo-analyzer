@@ -14,6 +14,7 @@ _PROVIDER_KEY_ATTRS = {
     "anthropic": "anthropic_api_key",
     "openai": "openai_api_key",
     "gemini": "gemini_api_key",
+    "groq": "groq_api_key",
 }
 
 
