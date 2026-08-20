@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -18,3 +20,17 @@ class FileTreeResponse(BaseModel):
 class FileContentResponse(BaseModel):
     path: str
     content: str
+
+
+class CodeBlockAnnotation(BaseModel):
+    category: Literal["imports", "config_state", "business_logic", "handlers_endpoints"]
+    start_line: int
+    end_line: int
+    logic_summary: str
+    flow: str
+    tips: str
+
+
+class FileAnnotationsResponse(BaseModel):
+    path: str
+    blocks: list[CodeBlockAnnotation]
