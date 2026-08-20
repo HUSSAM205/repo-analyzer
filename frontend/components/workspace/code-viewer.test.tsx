@@ -188,47 +188,68 @@ describe("CodeViewer Raw Code / Annotated View toggle", () => {
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
 
-  it("shows the detail message with a Retry button on a 503, and re-fetches on retry", async () => {
-    const { getAnnotationsCalls } = mockFetch((call) => {
-      if (call === 1) {
-        return Promise.resolve({
-          ok: false,
-          status: 503,
-          json: async () => ({ detail: "AI annotation is temporarily unavailable. Try again shortly." }),
-        } as unknown as Response);
-      }
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          path: "src/main.py",
-          blocks: [
-            {
-              category: "handlers_endpoints",
-              start_line: 1,
-              end_line: 2,
-              logic_summary: "Handles the request",
-              flow: "Dispatched by the router",
-              tips: "Validate input first",
-            },
-          ],
-        }),
-      } as unknown as Response);
-    });
+  const HANDLER_BLOCK_RESPONSE = {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      path: "src/main.py",
+      blocks: [
+        {
+          category: "handlers_endpoints",
+          start_line: 1,
+          end_line: 2,
+          logic_summary: "Handles the request",
+          flow: "Dispatched by the router",
+          tips: "Validate input first",
+        },
+      ],
+    }),
+  } as unknown as Response;
+
+  function make503(detail: string) {
+    return Promise.resolve({
+      ok: false,
+      status: 503,
+      json: async () => ({ detail }),
+    } as unknown as Response);
+  }
+
+  it("automatically retries and recovers silently from a single transient 503 (no manual click needed)", async () => {
+    const { getAnnotationsCalls } = mockFetch((call) =>
+      call === 1 ? make503("AI annotation is temporarily unavailable. Try again shortly.") : Promise.resolve(HANDLER_BLOCK_RESPONSE)
+    );
+
+    render(<CodeViewer repoId="r1" path="src/main.py" />);
+    await userEvent.click(await screen.findByRole("tab", { name: "Annotated View" }));
+
+    // The automatic retry has a real ~1.5s delay -- give findByText enough
+    // headroom to observe it without the test controlling time.
+    expect(await screen.findByText("Handlers & Endpoints", {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(getAnnotationsCalls()).toBe(2);
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  }, 10000);
+
+  it("falls back to the manual Retry button once automatic retries are exhausted on a persistent 503", async () => {
+    const { getAnnotationsCalls } = mockFetch((call) =>
+      call <= 2
+        ? make503("AI annotation is temporarily unavailable. Try again shortly.")
+        : Promise.resolve(HANDLER_BLOCK_RESPONSE)
+    );
 
     render(<CodeViewer repoId="r1" path="src/main.py" />);
     await userEvent.click(await screen.findByRole("tab", { name: "Annotated View" }));
 
     expect(
-      await screen.findByText("AI annotation is temporarily unavailable. Try again shortly.")
+      await screen.findByText("AI annotation is temporarily unavailable. Try again shortly.", {}, { timeout: 4000 })
     ).toBeInTheDocument();
+    expect(getAnnotationsCalls()).toBe(2);
     const retryButton = screen.getByRole("button", { name: "Retry" });
 
     await userEvent.click(retryButton);
 
     expect(await screen.findByText("Handlers & Endpoints")).toBeInTheDocument();
-    expect(getAnnotationsCalls()).toBe(2);
-  });
+    expect(getAnnotationsCalls()).toBe(3);
+  }, 10000);
 
   it("shows a generic 'could not load annotations' message on a 404", async () => {
     mockFetch(() =>

@@ -14,6 +14,9 @@ type ViewMode = "raw" | "annotated";
 type AnnotationsStatus = "idle" | "loading" | "success" | "error";
 type AnnotationsErrorKind = "too_large" | "unavailable" | "generic" | null;
 
+const MAX_ANNOTATION_ATTEMPTS = 2;
+const ANNOTATION_RETRY_DELAY_MS = 1500;
+
 // Distinct accent color per category, matching the backend contract's
 // closed set exactly -- a mismatch here would break rendering on real data.
 const CATEGORY_CONFIG: Record<CodeBlockAnnotation["category"], { label: string; badgeClass: string }> = {
@@ -107,11 +110,30 @@ export function CodeViewer({ repoId, path }: { repoId: string; path: string | nu
     setAnnotationsErrorKind(null);
     setAnnotationsErrorDetail(null);
 
-    try {
-      const res = await apiFetch(
-        `/api/repos/${repoId}/files/annotations?path=${encodeURIComponent(currentPath)}`,
-        { cache: "no-store" }
-      );
+    // GET is always safe to retry (no side effects, and the backend never
+    // negative-caches a failure -- see its own "safe to retry" contract),
+    // unlike chat's POST. Only the transient cases get an automatic retry:
+    // a thrown error (network drop) or 503 (AI momentarily unavailable,
+    // e.g. while a background repo analysis is saturating the same
+    // provider/host). 413 (too large) and 404 are permanent -- retrying
+    // wastes a request and won't change the outcome.
+    for (let attempt = 1; attempt <= MAX_ANNOTATION_ATTEMPTS; attempt++) {
+      let res: Response;
+      try {
+        res = await apiFetch(
+          `/api/repos/${repoId}/files/annotations?path=${encodeURIComponent(currentPath)}`,
+          { cache: "no-store" }
+        );
+      } catch {
+        if (attempt < MAX_ANNOTATION_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, ANNOTATION_RETRY_DELAY_MS));
+          continue;
+        }
+        setAnnotationsErrorKind("generic");
+        setAnnotationsErrorDetail(null);
+        setAnnotationsStatus("error");
+        return;
+      }
 
       if (res.status === 413) {
         const body = await res.json().catch(() => ({ detail: undefined }));
@@ -122,6 +144,10 @@ export function CodeViewer({ repoId, path }: { repoId: string; path: string | nu
       }
 
       if (res.status === 503) {
+        if (attempt < MAX_ANNOTATION_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, ANNOTATION_RETRY_DELAY_MS));
+          continue;
+        }
         const body = await res.json().catch(() => ({ detail: undefined }));
         setAnnotationsErrorKind("unavailable");
         setAnnotationsErrorDetail(body.detail ?? "AI annotation is temporarily unavailable.");
@@ -139,10 +165,7 @@ export function CodeViewer({ repoId, path }: { repoId: string; path: string | nu
       const data = (await res.json()) as FileAnnotationsResponse;
       setAnnotations(data);
       setAnnotationsStatus("success");
-    } catch {
-      setAnnotationsErrorKind("generic");
-      setAnnotationsErrorDetail(null);
-      setAnnotationsStatus("error");
+      return;
     }
   }
 
