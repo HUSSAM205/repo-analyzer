@@ -105,7 +105,10 @@ describe("ChatPanel streaming", () => {
 });
 
 describe("ChatPanel error retry", () => {
-  it("keeps the failed message available and resends it via the existing send logic when Retry is clicked", async () => {
+  it("automatically retries and recovers silently when the initial POST fails outright (no manual click needed)", async () => {
+    // A failure before any SSE event is read (thrown fetch, or a fast
+    // `!res.ok`) means nothing was ever generated/persisted server-side --
+    // safe to retry without the user noticing, unlike a mid-stream failure.
     const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
     let messagesPostCount = 0;
 
@@ -124,10 +127,11 @@ describe("ChatPanel error retry", () => {
         expect(JSON.parse(init?.body as string)).toEqual({ content: "Find the answer" });
         if (messagesPostCount === 1) {
           // First attempt fails outright (e.g. the backend was briefly
-          // unreachable) -- no body at all, mirroring the `!res.ok` path.
+          // unreachable during a background analysis job) -- no body at
+          // all, mirroring the `!res.ok` path.
           return Promise.resolve({ ok: false, body: null } as unknown as Response);
         }
-        // Retry succeeds.
+        // Automatic retry succeeds.
         return Promise.resolve({
           ok: true,
           body: makeStreamingBody([sseFrame("token", { text: "Here is the answer." }), sseFrame("done", { message_id: "m2" })]),
@@ -144,14 +148,105 @@ describe("ChatPanel error retry", () => {
     await userEvent.type(textbox, "Find the answer");
     await userEvent.click(screen.getByLabelText("Send message"));
 
-    expect(await screen.findByText("Could not send that message. Please try again.")).toBeInTheDocument();
+    // The automatic retry has a real ~1.5s delay -- give findByText enough
+    // headroom to observe it without the test itself controlling time.
+    expect(await screen.findByText("Here is the answer.", {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(messagesPostCount).toBe(2);
+    expect(screen.queryByText("Could not send that message. Please try again.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  }, 10000);
+
+  it("falls back to the manual Retry button once automatic retries are exhausted", async () => {
+    const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+    let messagesPostCount = 0;
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        messagesPostCount += 1;
+        if (messagesPostCount <= 2) {
+          // Both the initial attempt and the one automatic retry fail --
+          // MAX_SEND_ATTEMPTS is exhausted, so the persistent error UI
+          // (with a manual Retry button) must appear.
+          return Promise.resolve({ ok: false, body: null } as unknown as Response);
+        }
+        // The user's manual click succeeds.
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([sseFrame("token", { text: "Here is the answer." }), sseFrame("done", { message_id: "m2" })]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "Find the answer");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    expect(
+      await screen.findByText("Could not send that message. Please try again.", {}, { timeout: 4000 })
+    ).toBeInTheDocument();
+    expect(messagesPostCount).toBe(2);
     const retryButton = screen.getByRole("button", { name: "Retry" });
 
     await userEvent.click(retryButton);
 
     expect(await screen.findByText("Here is the answer.")).toBeInTheDocument();
-    expect(messagesPostCount).toBe(2);
+    expect(messagesPostCount).toBe(3);
     expect(screen.queryByText("Could not send that message. Please try again.")).not.toBeInTheDocument();
+  }, 10000);
+
+  it("does not auto-retry a failure that happens after streaming has already started", async () => {
+    // Once any SSE event has been read, the backend has already accepted
+    // and may be generating/persisting the turn -- retrying automatically
+    // here would risk duplicating it, so this must surface the error
+    // immediately with only the manual Retry path available.
+    const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+    let messagesPostCount = 0;
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        messagesPostCount += 1;
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([sseFrame("error", { message: "The assistant hit an error." })]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "Find the answer");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    expect(await screen.findByText("The assistant hit an error.")).toBeInTheDocument();
+    expect(messagesPostCount).toBe(1); // no automatic retry
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 });
 

@@ -14,6 +14,19 @@ import type { ChatMessage as ChatMessageType, Conversation } from "@/lib/types";
 
 const QUICK_PROMPTS = ["Explain repo architecture", "Find security vulnerabilities", "List API routes"];
 
+// A failure before any stream content has been received means the request
+// never reached working chat logic server-side (network drop, or a fast
+// non-2xx like a transient 502/503 while the backend is briefly overloaded
+// -- e.g. during a heavy background repo analysis) -- so it's always safe
+// to retry automatically: nothing could have been generated/persisted yet.
+// Once even one SSE event has been read, a retry is no longer attempted
+// automatically (that's what the existing manual Retry button is for) --
+// re-sending at that point risks duplicating a turn the backend already
+// started.
+const MAX_SEND_ATTEMPTS = 2;
+const AUTO_RETRY_DELAY_MS = 1500;
+type SendOutcome = "success" | "retry" | "failed";
+
 export function ChatPanel({
   repoId,
   onCitationClick,
@@ -141,37 +154,35 @@ export function ChatPanel({
     }
   }
 
-  async function handleSend(content: string) {
-    if (!activeId) return;
-    setError(null);
-    setFailedMessage(null);
-    setMessages((prev) => [
-      ...prev,
-      { id: `local-${Date.now()}`, role: "user", content, created_at: new Date().toISOString() },
-    ]);
-    setIsStreaming(true);
-    setStreamingText("");
-    setStatusText(null);
-    setAutoScroll(true);
-
+  // One attempt at sending `content`. Returns "retry" only for a failure
+  // that happened before any SSE event was read (see MAX_SEND_ATTEMPTS'
+  // comment) -- every other outcome (success, or a failure once streaming
+  // had already started) is terminal and sets the persistent error UI
+  // itself so the caller doesn't need to.
+  async function attemptSend(content: string): Promise<SendOutcome> {
+    let res: Response;
     try {
-      const res = await apiFetch(`/api/conversations/${activeId}/messages`, {
+      res = await apiFetch(`/api/conversations/${activeId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content }),
       });
-      if (!res.ok || !res.body) {
-        setError("Could not send that message. Please try again.");
-        setFailedMessage(content);
-        setIsStreaming(false);
-        return;
-      }
+    } catch {
+      return "retry"; // thrown before any response was received -- nothing sent yet
+    }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let finalText = "";
+    if (!res.ok || !res.body) {
+      return "retry"; // e.g. a transient 502/503 -- the chat turn never started server-side
+    }
 
+    // From here on the request has been accepted; no more automatic
+    // retries past this point, only the persistent error UI + manual Retry.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalText = "";
+
+    try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -209,7 +220,7 @@ export function ChatPanel({
               // recovered from the stream. Refetch the conversation's
               // message list instead, which reflects whatever was actually
               // persisted, rather than rendering a blank assistant bubble.
-              await refetchMessages(activeId);
+              await refetchMessages(activeId!);
             }
             setStreamingText("");
             setStatusText(null);
@@ -217,15 +228,47 @@ export function ChatPanel({
             setError((event.data as { message?: string }).message ?? "The assistant hit an error.");
             setFailedMessage(content);
             setStatusText(null);
+            return "failed";
           }
         }
       }
+      return "success";
     } catch {
       setError("Connection lost while streaming the response.");
       setFailedMessage(content);
-    } finally {
-      setIsStreaming(false);
+      return "failed";
     }
+  }
+
+  async function handleSend(content: string) {
+    if (!activeId) return;
+    setError(null);
+    setFailedMessage(null);
+    setMessages((prev) => [
+      ...prev,
+      { id: `local-${Date.now()}`, role: "user", content, created_at: new Date().toISOString() },
+    ]);
+    setIsStreaming(true);
+    setStreamingText("");
+    setStatusText(null);
+    setAutoScroll(true);
+
+    for (let attempt = 1; attempt <= MAX_SEND_ATTEMPTS; attempt++) {
+      const outcome = await attemptSend(content);
+      if (outcome !== "retry") {
+        break; // "success" or "failed" -- attemptSend already set any error UI needed
+      }
+      if (attempt < MAX_SEND_ATTEMPTS) {
+        setStatusText("Connection issue -- retrying...");
+        await new Promise((resolve) => setTimeout(resolve, AUTO_RETRY_DELAY_MS));
+        setStatusText(null);
+      } else {
+        setError("Could not send that message. Please try again.");
+        setFailedMessage(content);
+      }
+    }
+
+    setIsStreaming(false);
   }
 
   function handleRetry() {
