@@ -5,6 +5,7 @@ from pathlib import Path
 import git
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import CodeChunk, Job, JobStatus, Repo, RepoStatus, User
 from app.db.session import async_session_maker
@@ -208,6 +209,65 @@ async def test_analyze_repo_task_marks_failed_on_bad_url():
 
         await db.delete(refreshed_job)
         refreshed_repo = await db.get(Repo, repo_id)
+        await db.delete(refreshed_repo)
+        refreshed_user = await db.get(User, user_id)
+        await db.delete(refreshed_user)
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_analyze_repo_task_marks_failed_when_running_transition_fails(monkeypatch):
+    # Mirrors test_analyze_enqueue_failure_marks_job_failed in
+    # test_repos_api.py, one step earlier in the pipeline: the RUNNING
+    # status transition + its commit used to happen *before* the try/except
+    # in analyze_repo, so a transient DB blip there (e.g. db.get(Repo, ...)
+    # or the commit itself raising) would propagate uncaught out of the job
+    # -- leaving both Job and Repo stuck PENDING forever, since all
+    # failure-handling lived in the except blocks further down. Simulate
+    # that blip by making the *first* AsyncSession.commit() call raise; it
+    # must still be caught and both rows marked FAILED.
+    async with async_session_maker() as db:
+        user = User(email=f"worker-{uuid.uuid4()}@example.com", hashed_password="hashed")
+        db.add(user)
+        await db.flush()
+
+        repo = Repo(
+            user_id=user.id, url="/nonexistent/running-transition-blip", name="blip-repo",
+            status=RepoStatus.PENDING,
+        )
+        db.add(repo)
+        await db.flush()
+
+        job = Job(repo_id=repo.id, status=JobStatus.PENDING)
+        db.add(job)
+        await db.commit()
+        job_id = str(job.id)
+        repo_id = repo.id
+        user_id = user.id
+
+    original_commit = AsyncSession.commit
+    call_count = {"n": 0}
+
+    async def flaky_commit(self, *args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated transient DB blip during RUNNING transition")
+        return await original_commit(self, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "commit", flaky_commit)
+    try:
+        await analyze_repo({}, job_id)
+    finally:
+        monkeypatch.undo()
+
+    async with async_session_maker() as db:
+        refreshed_job = await db.get(Job, uuid.UUID(job_id))
+        assert refreshed_job.status == JobStatus.FAILED
+        assert refreshed_job.error_message is not None
+        refreshed_repo = await db.get(Repo, repo_id)
+        assert refreshed_repo.status == RepoStatus.FAILED
+
+        await db.delete(refreshed_job)
         await db.delete(refreshed_repo)
         refreshed_user = await db.get(User, user_id)
         await db.delete(refreshed_user)

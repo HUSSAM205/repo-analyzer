@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,23 +20,35 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
         if job is None:
             return
 
-        repo = await db.get(Repo, job.repo_id)
-        job.status = JobStatus.RUNNING
-        job.started_at = datetime.now(timezone.utc)
-        await db.commit()
+        # repo is looked up here so it's in scope for the except blocks below,
+        # but it's None until the try block actually sets it -- if db.get()
+        # or the RUNNING commit itself raises (e.g. a transient DB blip),
+        # the except blocks must still be able to tell there's no repo row
+        # to mark FAILED yet (or find/mark it, once fetched) rather than
+        # raising an uncaught NameError/AttributeError on top of the
+        # original failure.
+        repo = None
 
         try:
+            repo = await db.get(Repo, job.repo_id)
+            job.status = JobStatus.RUNNING
+            job.started_at = datetime.now(timezone.utc)
+            await db.commit()
+
             with tempfile.TemporaryDirectory() as tmp_dir:
-                clone_path = clone_repo(
+                clone_path = await asyncio.to_thread(
+                    clone_repo,
                     repo.url, Path(tmp_dir) / "repo",
                     max_size_mb=settings.max_repo_size_mb,
                     timeout_seconds=settings.clone_timeout_seconds,
                 )
-                walk_result = walk_and_chunk(clone_path, max_files=settings.max_files_per_repo)
+                walk_result = await asyncio.to_thread(
+                    walk_and_chunk, clone_path, max_files=settings.max_files_per_repo
+                )
                 job.progress = 50
                 await db.commit()
 
-                embedded = embed_chunks(walk_result.chunks)
+                embedded = await asyncio.to_thread(embed_chunks, walk_result.chunks)
                 job.progress = 90
                 await db.commit()
 
