@@ -58,3 +58,190 @@ describe("CodeViewer", () => {
     expect(await screen.findByLabelText("Copied")).toBeInTheDocument();
   });
 });
+
+describe("CodeViewer Raw Code / Annotated View toggle", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const CONTENT = "line1\nline2\nline3\nline4\nline5";
+
+  function mockFetch(annotationsImpl: (call: number) => Promise<Response>) {
+    let contentCalls = 0;
+    let annotationsCalls = 0;
+    const fn = jest.fn((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/files/content")) {
+        contentCalls += 1;
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ path: "src/main.py", content: CONTENT }),
+        } as Response);
+      }
+      if (url.includes("/files/annotations")) {
+        annotationsCalls += 1;
+        return annotationsImpl(annotationsCalls);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+    global.fetch = fn;
+    return {
+      getContentCalls: () => contentCalls,
+      getAnnotationsCalls: () => annotationsCalls,
+    };
+  }
+
+  it("defaults to Raw Code with both toggle options rendered", async () => {
+    mockFetch(() => Promise.reject(new Error("should not be called")));
+
+    render(<CodeViewer repoId="r1" path="src/main.py" />);
+
+    const rawTab = await screen.findByRole("tab", { name: "Raw Code" });
+    const annotatedTab = await screen.findByRole("tab", { name: "Annotated View" });
+    expect(rawTab).toHaveAttribute("aria-selected", "true");
+    expect(annotatedTab).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("shows an 'AI is analyzing' loading state while annotations are being fetched", async () => {
+    mockFetch(() => new Promise(() => {})); // never resolves -- stays "loading"
+
+    render(<CodeViewer repoId="r1" path="src/main.py" />);
+    const annotatedTab = await screen.findByRole("tab", { name: "Annotated View" });
+
+    await userEvent.click(annotatedTab);
+
+    expect(await screen.findByText(/AI is analyzing this file/i)).toBeInTheDocument();
+  });
+
+  it("renders blocks with category badges and AI card fields on success, and switches back to Raw Code instantly with no re-fetch", async () => {
+    const { getContentCalls, getAnnotationsCalls } = mockFetch((call) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          path: "src/main.py",
+          blocks: [
+            {
+              category: "imports",
+              start_line: 1,
+              end_line: 2,
+              logic_summary: "Pulls in dependencies",
+              flow: "Runs before anything else",
+              tips: "Keep this list tidy",
+            },
+            {
+              category: "business_logic",
+              start_line: 3,
+              end_line: 5,
+              logic_summary: "Implements the core rule",
+              flow: "Called from the handler below",
+              tips: "Covered by unit tests",
+            },
+          ],
+        }),
+      } as unknown as Response)
+    );
+
+    render(<CodeViewer repoId="r1" path="src/main.py" />);
+    const annotatedTab = await screen.findByRole("tab", { name: "Annotated View" });
+    await userEvent.click(annotatedTab);
+
+    expect(await screen.findByText("Imports")).toBeInTheDocument();
+    expect(screen.getByText("Business Logic")).toBeInTheDocument();
+    expect(screen.getByText("Pulls in dependencies")).toBeInTheDocument();
+    expect(screen.getByText("Runs before anything else")).toBeInTheDocument();
+    expect(screen.getByText("Keep this list tidy")).toBeInTheDocument();
+    expect(screen.getByText("Implements the core rule")).toBeInTheDocument();
+
+    expect(getContentCalls()).toBe(1);
+    expect(getAnnotationsCalls()).toBe(1);
+
+    const rawTab = screen.getByRole("tab", { name: "Raw Code" });
+    await userEvent.click(rawTab);
+
+    expect(screen.getByText("src/main.py")).toBeInTheDocument();
+    expect(screen.queryByText("Imports")).not.toBeInTheDocument();
+    // Switching back to Raw Code must be instant -- the already-fetched
+    // content is reused, not re-fetched.
+    expect(getContentCalls()).toBe(1);
+
+    // Switching to Annotated View again must also not re-fetch -- the
+    // already-fetched annotations are cached in memory.
+    await userEvent.click(screen.getByRole("tab", { name: "Annotated View" }));
+    expect(await screen.findByText("Imports")).toBeInTheDocument();
+    expect(getAnnotationsCalls()).toBe(1);
+  });
+
+  it("shows a distinct 'too large to annotate' state on a 413, with the backend's detail message", async () => {
+    mockFetch(() =>
+      Promise.resolve({
+        ok: false,
+        status: 413,
+        json: async () => ({ detail: "This file has 4,200 lines -- too large to annotate." }),
+      } as unknown as Response)
+    );
+
+    render(<CodeViewer repoId="r1" path="src/main.py" />);
+    await userEvent.click(await screen.findByRole("tab", { name: "Annotated View" }));
+
+    expect(await screen.findByText("This file has 4,200 lines -- too large to annotate.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("shows the detail message with a Retry button on a 503, and re-fetches on retry", async () => {
+    const { getAnnotationsCalls } = mockFetch((call) => {
+      if (call === 1) {
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          json: async () => ({ detail: "AI annotation is temporarily unavailable. Try again shortly." }),
+        } as unknown as Response);
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          path: "src/main.py",
+          blocks: [
+            {
+              category: "handlers_endpoints",
+              start_line: 1,
+              end_line: 2,
+              logic_summary: "Handles the request",
+              flow: "Dispatched by the router",
+              tips: "Validate input first",
+            },
+          ],
+        }),
+      } as unknown as Response);
+    });
+
+    render(<CodeViewer repoId="r1" path="src/main.py" />);
+    await userEvent.click(await screen.findByRole("tab", { name: "Annotated View" }));
+
+    expect(
+      await screen.findByText("AI annotation is temporarily unavailable. Try again shortly.")
+    ).toBeInTheDocument();
+    const retryButton = screen.getByRole("button", { name: "Retry" });
+
+    await userEvent.click(retryButton);
+
+    expect(await screen.findByText("Handlers & Endpoints")).toBeInTheDocument();
+    expect(getAnnotationsCalls()).toBe(2);
+  });
+
+  it("shows a generic 'could not load annotations' message on a 404", async () => {
+    mockFetch(() =>
+      Promise.resolve({
+        ok: false,
+        status: 404,
+        json: async () => ({ detail: "File not found" }),
+      } as unknown as Response)
+    );
+
+    render(<CodeViewer repoId="r1" path="src/main.py" />);
+    await userEvent.click(await screen.findByRole("tab", { name: "Annotated View" }));
+
+    expect(await screen.findByText(/could not load annotations/i)).toBeInTheDocument();
+  });
+});
