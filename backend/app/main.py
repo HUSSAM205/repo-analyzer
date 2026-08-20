@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -7,6 +8,13 @@ from app.config import get_settings
 from app.core.embeddings import _model, _tokenizer
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+_PROVIDER_KEY_ATTRS = {
+    "anthropic": "anthropic_api_key",
+    "openai": "openai_api_key",
+    "gemini": "gemini_api_key",
+}
 
 
 @asynccontextmanager
@@ -17,6 +25,21 @@ async def lifespan(app: FastAPI):
     # first real search request.
     _tokenizer()
     _model()
+
+    # Surface a fully misconfigured LLM provider at deploy time instead of
+    # only discoverable by sending a chat message. Non-blocking: get_llm_client()
+    # already falls back to another configured provider if one is usable, and
+    # already raises a clear error at call time if none are -- this is just an
+    # early, visible-in-logs heads-up.
+    key_attr = _PROVIDER_KEY_ATTRS.get(settings.llm_provider)
+    if key_attr is not None and not getattr(settings, key_attr):
+        logger.warning(
+            "LLM_PROVIDER=%s but %s is not configured; chat requests will "
+            "rely on a fallback provider (if any are configured) or fail.",
+            settings.llm_provider,
+            key_attr.upper(),
+        )
+
     yield
 
 

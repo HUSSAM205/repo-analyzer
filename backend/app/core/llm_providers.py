@@ -20,6 +20,15 @@ logger = logging.getLogger(__name__)
 # OpenAIClient.stream_chat, and GeminiClient.stream_chat below.
 _PROVIDER_ERROR_MESSAGE = "The AI provider is currently unavailable. Please try again."
 
+# Explicit rather than relying on each SDK's implicit default, so a hung
+# connection to a provider surfaces as a bounded failure instead of an
+# unbounded hang.
+_CLIENT_TIMEOUT_SECONDS = 60.0
+
+# Fixed priority order used both for "which provider did the operator pick"
+# (settings.llm_provider) and for get_llm_client()'s fallback below.
+_FALLBACK_PROVIDER_ORDER = ("anthropic", "openai", "gemini")
+
 
 def _to_anthropic_messages(messages: list[Message]) -> list[dict]:
     result: list[dict] = []
@@ -48,7 +57,7 @@ def _to_anthropic_messages(messages: list[Message]) -> list[dict]:
 
 class AnthropicClient:
     def __init__(self, api_key: str, model: str):
-        self._client = AsyncAnthropic(api_key=api_key)
+        self._client = AsyncAnthropic(api_key=api_key, timeout=_CLIENT_TIMEOUT_SECONDS)
         self._model = model
 
     async def stream_chat(
@@ -114,7 +123,7 @@ def _to_openai_messages(messages: list[Message]) -> list[dict]:
 
 class OpenAIClient:
     def __init__(self, api_key: str, model: str):
-        self._client = AsyncOpenAI(api_key=api_key)
+        self._client = AsyncOpenAI(api_key=api_key, timeout=_CLIENT_TIMEOUT_SECONDS)
         self._model = model
 
     async def stream_chat(
@@ -225,7 +234,12 @@ def _gemini_response_parts(chunk) -> list:
 
 class GeminiClient:
     def __init__(self, api_key: str, model: str):
-        self._client = genai.Client(api_key=api_key)
+        # HttpOptions.timeout is in milliseconds, unlike the other two SDKs'
+        # second-based timeout kwargs.
+        self._client = genai.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(timeout=int(_CLIENT_TIMEOUT_SECONDS * 1000)),
+        )
         self._model = model
         # Cache of ToolCall.id -> thought_signature, and the counter that
         # generates those ids. Both live on the instance (not as
@@ -287,6 +301,22 @@ class GeminiClient:
             yield LLMEvent(type="error", error=_PROVIDER_ERROR_MESSAGE)
 
 
+def _provider_api_key(current_settings, provider: str) -> str | None:
+    if provider == "openai":
+        return current_settings.openai_api_key
+    if provider == "gemini":
+        return current_settings.gemini_api_key
+    return current_settings.anthropic_api_key
+
+
+def _build_provider_client(current_settings, provider: str):
+    if provider == "openai":
+        return OpenAIClient(api_key=current_settings.openai_api_key, model=current_settings.openai_model)
+    if provider == "gemini":
+        return GeminiClient(api_key=current_settings.gemini_api_key, model=current_settings.gemini_model)
+    return AnthropicClient(api_key=current_settings.anthropic_api_key, model=current_settings.anthropic_model)
+
+
 def get_llm_client():
     current_settings = get_settings()
     if current_settings.llm_provider == "fake":
@@ -301,14 +331,23 @@ def get_llm_client():
                 )
             ]
         )
-    if current_settings.llm_provider == "openai":
-        if not current_settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured but LLM_PROVIDER=openai")
-        return OpenAIClient(api_key=current_settings.openai_api_key, model=current_settings.openai_model)
-    if current_settings.llm_provider == "gemini":
-        if not current_settings.gemini_api_key:
-            raise RuntimeError("GEMINI_API_KEY is not configured but LLM_PROVIDER=gemini")
-        return GeminiClient(api_key=current_settings.gemini_api_key, model=current_settings.gemini_model)
-    if not current_settings.anthropic_api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not configured but LLM_PROVIDER=anthropic")
-    return AnthropicClient(api_key=current_settings.anthropic_api_key, model=current_settings.anthropic_model)
+
+    # Resolution-time fallback only: try the configured provider first, then
+    # the other two (in a fixed order) so a missing/invalid key on the
+    # configured provider doesn't take the whole chat feature down when a
+    # second provider is usable. This does NOT cover mid-stream failover --
+    # each *Client.stream_chat already degrades a failure into a clean SSE
+    # error event (see _PROVIDER_ERROR_MESSAGE above), and switching
+    # providers mid-stream would risk duplicating partial output.
+    providers_to_try = [current_settings.llm_provider] + [
+        p for p in _FALLBACK_PROVIDER_ORDER if p != current_settings.llm_provider
+    ]
+
+    for provider in providers_to_try:
+        if _provider_api_key(current_settings, provider):
+            return _build_provider_client(current_settings, provider)
+
+    raise RuntimeError(
+        "No LLM provider is configured -- set at least one of ANTHROPIC_API_KEY, "
+        "OPENAI_API_KEY, or GEMINI_API_KEY."
+    )

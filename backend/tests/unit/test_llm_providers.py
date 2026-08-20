@@ -333,18 +333,60 @@ def test_get_llm_client_returns_gemini_client_when_provider_is_gemini(monkeypatc
         get_settings.cache_clear()
 
 
-def test_get_llm_client_raises_when_gemini_key_missing(monkeypatch):
+def test_get_llm_client_falls_back_to_configured_secondary_provider(monkeypatch):
+    # If the configured provider's key is missing/invalid but another
+    # provider is configured, get_llm_client() must fall back to it instead
+    # of raising -- this is the resolution-time fallback added to fix the
+    # "no fallback when the configured provider is unusable" audit finding.
+    from app.core.llm_providers import AnthropicClient, get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    # Settings reads *_API_KEY from backend/.env (which carries real keys in
+    # this environment) whenever the environment variable itself is unset --
+    # pydantic-settings falls back to the dotenv file, so plain delenv
+    # wouldn't actually clear it. Setting the env var to an empty string
+    # overrides the dotenv value (env vars rank above dotenv in
+    # pydantic-settings' source priority) while still being falsy.
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-fallback-key")
+    get_settings.cache_clear()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, AnthropicClient)
+    finally:
+        get_settings.cache_clear()
+
+
+def test_get_llm_client_prefers_configured_provider_over_fallback(monkeypatch):
+    # When the configured provider *does* have a usable key, it must win
+    # even though other providers are also configured -- fallback is only
+    # for when the configured provider is unusable.
+    from app.core.llm_providers import OpenAIClient, get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    get_settings.cache_clear()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, OpenAIClient)
+    finally:
+        get_settings.cache_clear()
+
+
+def test_get_llm_client_raises_when_no_provider_configured(monkeypatch):
+    # Only when literally none of the three providers have a key set should
+    # get_llm_client() raise.
     from app.core.llm_providers import get_llm_client
     from app.config import get_settings
 
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    # Settings reads GEMINI_API_KEY from backend/.env (which carries a real
-    # key in this environment) whenever the environment variable itself is
-    # unset -- pydantic-settings falls back to the dotenv file, so plain
-    # delenv wouldn't actually clear it. Setting the env var to an empty
-    # string overrides the dotenv value (env vars rank above dotenv in
-    # pydantic-settings' source priority) while still being falsy.
     monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     get_settings.cache_clear()
     try:
         with pytest.raises(RuntimeError):
