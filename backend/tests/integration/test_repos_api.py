@@ -24,9 +24,14 @@ async def _register_and_login(client: AsyncClient) -> str:
 async def test_analyze_endpoint_creates_job_and_returns_202():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         token = await _register_and_login(client)
+        # A URL unique to this run -- a hardcoded URL would collide with
+        # whatever repo/job a previous run (or another test) already created
+        # for it, since repos are deduped globally by URL (see the dedup
+        # tests below), making the "freshly pending" assertion below flaky.
+        url = f"https://github.com/octocat/create-job-{uuid.uuid4()}"
         resp = await client.post(
             "/api/v1/repos/analyze",
-            json={"repo_url": "https://github.com/octocat/Hello-World"},
+            json={"repo_url": url},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 202
@@ -252,7 +257,7 @@ async def test_list_repos_does_not_include_latest_job():
 async def test_analyze_ready_repo_returns_existing_repo_no_new_job():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first_token = await _register_and_login(client)
-        url = "https://github.com/octocat/boilerplate"
+        url = f"https://github.com/octocat/boilerplate-{uuid.uuid4()}"
         first_resp = await client.post(
             "/api/v1/repos/analyze", json={"repo_url": url}, headers={"Authorization": f"Bearer {first_token}"}
         )
@@ -281,7 +286,7 @@ async def test_analyze_ready_repo_returns_existing_repo_no_new_job():
 async def test_analyze_pending_repo_returns_existing_repo_no_new_job():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first_token = await _register_and_login(client)
-        url = "https://github.com/octocat/still-analyzing"
+        url = f"https://github.com/octocat/still-analyzing-{uuid.uuid4()}"
         first_resp = await client.post(
             "/api/v1/repos/analyze", json={"repo_url": url}, headers={"Authorization": f"Bearer {first_token}"}
         )
