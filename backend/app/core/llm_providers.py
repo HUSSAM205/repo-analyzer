@@ -198,7 +198,7 @@ class OpenAIClient:
 
 
 class GroqClient(OpenAIClient):
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, fallback_model: str | None = None):
         # Deliberately does not call super().__init__(): that constructs an
         # AsyncOpenAI client with no base_url override (real OpenAI). Groq
         # needs its own base_url but the exact same message/tool-call
@@ -206,6 +206,8 @@ class GroqClient(OpenAIClient):
         # client construction and inherits stream_chat unchanged.
         self._client = AsyncOpenAI(api_key=api_key, base_url=_GROQ_BASE_URL, timeout=_CLIENT_TIMEOUT_SECONDS)
         self._model = model
+        self._fallback_model = fallback_model
+        self._switched_to_fallback = False
 
     async def _get_stream(self, openai_messages: list[dict], openai_tools: list[dict]):
         # Retries only the stream-establishment call (see the base class'
@@ -229,6 +231,22 @@ class GroqClient(OpenAIClient):
                 )
             except Exception as exc:
                 last_exc = exc
+                # A 404/"model not found" (openai.NotFoundError) means the
+                # configured model id has been retired or renamed on Groq's
+                # side -- retrying the SAME model, with or without backoff,
+                # will 404 every time. Switch once to the configured
+                # fallback model and retry immediately (still within the
+                # same attempt budget), rather than burning every remaining
+                # attempt on a model that can never succeed.
+                is_not_found = getattr(exc, "status_code", None) == 404 or type(exc).__name__ == "NotFoundError"
+                if is_not_found and self._fallback_model and not self._switched_to_fallback:
+                    logger.warning(
+                        "GroqClient: model=%s not found on Groq (likely retired) -- "
+                        "switching to fallback model=%s",
+                        self._model, self._fallback_model,
+                    )
+                    self._model = self._fallback_model
+                    self._switched_to_fallback = True
         assert last_exc is not None
         raise last_exc
 
@@ -377,7 +395,11 @@ def _build_provider_client(current_settings, provider: str):
     if provider == "gemini":
         return GeminiClient(api_key=current_settings.gemini_api_key, model=current_settings.gemini_model)
     if provider == "groq":
-        return GroqClient(api_key=current_settings.groq_api_key, model=current_settings.groq_model)
+        return GroqClient(
+            api_key=current_settings.groq_api_key,
+            model=current_settings.groq_model,
+            fallback_model=current_settings.groq_fallback_model,
+        )
     return AnthropicClient(api_key=current_settings.anthropic_api_key, model=current_settings.anthropic_model)
 
 

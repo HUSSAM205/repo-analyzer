@@ -529,4 +529,85 @@ async def test_groq_client_bounds_each_connect_attempt_by_its_own_timeout(monkey
     elapsed = asyncio.get_event_loop().time() - start
 
     assert elapsed < 5  # bounded by the 0.05s timeout, nowhere near the real 10s hang
+
+
+@pytest.mark.asyncio
+async def test_groq_client_switches_to_fallback_model_on_not_found(monkeypatch):
+    # Groq occasionally retires a model id outright (confirmed live against
+    # GET /openai/v1/models -- llama-3.3-70b-versatile and
+    # llama-3.1-8b-instant both 404 as of this deployment). Retrying the
+    # same retired model, even with backoff, can never succeed -- this
+    # proves the client detects a 404/NotFoundError specifically and
+    # switches to the configured fallback model instead of burning its
+    # whole retry budget on a model that will never come back.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    # A minimal stand-in for openai.NotFoundError: the client's detection
+    # falls back to matching on the exception's class name specifically so
+    # this test doesn't need to construct the real SDK exception (which
+    # requires real httpx request/response internals).
+    class NotFoundError(Exception):
+        status_code = 404
+
+    client = GroqClient(api_key="test-key", model="retired-model", fallback_model="working-model")
+    models_seen: list[str] = []
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk("hi")
+
+    async def create(*args, **kwargs):
+        models_seen.append(kwargs["model"])
+        if kwargs["model"] == "retired-model":
+            raise NotFoundError("model_not_found")
+        return fake_stream()
+
+    client._client.chat.completions.create = create
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert models_seen == ["retired-model", "working-model"]
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "hi"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_does_not_switch_models_on_a_generic_transient_error(monkeypatch):
+    # A non-404 failure (rate limit, connection reset, etc.) is genuinely
+    # transient -- the configured model is fine, so retries must keep using
+    # it rather than prematurely abandoning it for the fallback.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(api_key="test-key", model="primary-model", fallback_model="fallback-model")
+    models_seen: list[str] = []
+
+    async def always_transient_failure(*args, **kwargs):
+        models_seen.append(kwargs["model"])
+        raise RuntimeError("connection reset")
+
+    client._client.chat.completions.create = always_transient_failure
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert models_seen == ["primary-model"] * llm_providers_module._GROQ_MAX_ATTEMPTS
+    assert events[-1].type == "error"
     assert events[-1].type == "error"
