@@ -17,6 +17,11 @@ export function SubmitRepoForm({ compact = false }: { compact?: boolean } = {}) 
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // Defense in depth alongside the Button's `disabled` attribute (and now
+    // the Input's) -- neither is a hard guarantee against a re-entrant
+    // submit (e.g. a fast double Enter-key press before React re-renders
+    // the disabled state), so bail out explicitly too.
+    if (submitting) return;
     setError(null);
     setSubmitting(true);
     try {
@@ -53,6 +58,7 @@ export function SubmitRepoForm({ compact = false }: { compact?: boolean } = {}) 
       <Input
         type="url"
         required
+        disabled={submitting}
         placeholder="https://github.com/owner/repo"
         value={url}
         onChange={(e) => setUrl(e.target.value)}
