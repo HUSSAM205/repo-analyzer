@@ -13,7 +13,7 @@ from app.api.deps import get_current_user, get_repo_or_404
 from app.core.rate_limit import enforce_analyze_rate_limit
 from app.db.models import Job, JobStatus, Repo, RepoStatus, User
 from app.db.session import get_db
-from app.schemas.repos import JobResponse, RepoAnalyzeRequest, RepoAnalyzeResponse, RepoResponse
+from app.schemas.repos import DomainBriefing, JobResponse, RepoAnalyzeRequest, RepoAnalyzeResponse, RepoResponse
 
 router = APIRouter(prefix="/api/v1/repos", tags=["repos"])
 settings = get_settings()
@@ -148,4 +148,5 @@ async def get_repo(
         status=repo.status,
         created_at=repo.created_at,
         latest_job=JobResponse.model_validate(latest_job) if latest_job is not None else None,
+        domain_briefing=DomainBriefing.model_validate(repo.domain_briefing) if repo.domain_briefing else None,
     )

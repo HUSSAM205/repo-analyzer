@@ -188,6 +188,50 @@ async def test_get_repo_by_id_includes_latest_job():
 
 
 @pytest.mark.asyncio
+async def test_get_repo_by_id_includes_domain_briefing_and_job_stage():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _register_and_login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"https://github.com/octocat/domain-briefing-{uuid.uuid4()}"
+        analyze_resp = await client.post(
+            "/api/v1/repos/analyze", json={"repo_url": url}, headers=headers
+        )
+        repo_id = analyze_resp.json()["repo_id"]
+        job_id = analyze_resp.json()["job_id"]
+
+        # Before analysis has produced a briefing (or set a stage), both
+        # fields must be present in the response shape but null.
+        resp = await client.get(f"/api/v1/repos/{repo_id}", headers=headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["domain_briefing"] is None
+        assert body["latest_job"]["stage"] is None
+
+        briefing = {
+            "primary_field": "Full-Stack Web SaaS",
+            "target_audience": "Backend engineers building async job pipelines",
+            "architecture_overview": "Data flows from the API layer into Postgres via SQLAlchemy.",
+            "tech_stack_badges": ["FastAPI", "PostgreSQL", "Docker"],
+            "file_type_distribution": [
+                {"label": "Python backend files", "count": 12},
+                {"label": "Config files", "count": 3},
+            ],
+        }
+        async with async_session_maker() as db:
+            repo = await db.get(Repo, uuid.UUID(repo_id))
+            repo.domain_briefing = briefing
+            job = await db.get(Job, uuid.UUID(job_id))
+            job.stage = "parsing"
+            await db.commit()
+
+        resp2 = await client.get(f"/api/v1/repos/{repo_id}", headers=headers)
+        assert resp2.status_code == 200
+        body2 = resp2.json()
+        assert body2["domain_briefing"] == briefing
+        assert body2["latest_job"]["stage"] == "parsing"
+
+
+@pytest.mark.asyncio
 async def test_list_repos_does_not_include_latest_job():
     # latest_job is only populated by the single-repo detail endpoint --
     # deliberately not by the list endpoint, to avoid an N+1 query there.

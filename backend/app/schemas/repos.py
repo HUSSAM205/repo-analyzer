@@ -20,10 +20,26 @@ class JobResponse(BaseModel):
     repo_id: uuid.UUID
     status: str
     progress: int
+    # One of "cloning", "parsing", "embedding", "completed" while/after the
+    # pipeline runs; None for a job that hasn't started yet.
+    stage: str | None = None
     error_message: str | None
     skipped_files: int
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class FileTypeDistributionEntry(BaseModel):
+    label: str
+    count: int
+
+
+class DomainBriefing(BaseModel):
+    primary_field: str
+    target_audience: str
+    architecture_overview: str
+    tech_stack_badges: list[str]
+    file_type_distribution: list[FileTypeDistributionEntry]
 
 
 class RepoResponse(BaseModel):
@@ -40,3 +56,7 @@ class RepoResponse(BaseModel):
     # on a `?job=<id>` query param that's only set once at submission time
     # and lost on reload or a shared link.
     latest_job: JobResponse | None = None
+    # The "Domain & Purpose Classification" briefing produced once analysis
+    # completes -- see app.core.domain_briefing.generate_domain_briefing.
+    # None until analysis has finished (or if the repo predates this field).
+    domain_briefing: DomainBriefing | None = None
