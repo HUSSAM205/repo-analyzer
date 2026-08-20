@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Boolean, Computed, DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -78,6 +78,10 @@ class Repo(Base):
         default=RepoStatus.PENDING, nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    # Structured "Domain & Purpose Classification" briefing produced by
+    # app.core.domain_briefing.generate_domain_briefing once analysis
+    # completes -- see app/schemas/repos.py's DomainBriefing for the shape.
+    domain_briefing: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="repos")
     jobs: Mapped[list["Job"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
@@ -98,6 +102,11 @@ class Job(Base):
         default=JobStatus.PENDING, nullable=False,
     )
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # One of "cloning", "parsing", "embedding", "completed" -- set at the
+    # corresponding points in app.workers.tasks.analyze_repo. Plain string
+    # rather than a SQLAlchemy Enum: no other consumer needs to reference
+    # these values at the type level.
+    stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     skipped_files: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
