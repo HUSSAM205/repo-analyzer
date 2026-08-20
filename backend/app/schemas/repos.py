@@ -34,3 +34,9 @@ class RepoResponse(BaseModel):
     name: str
     status: str
     created_at: datetime
+    # Populated only by GET /repos/{repo_id} (the single-repo detail
+    # endpoint), not by GET /repos (list), to avoid an N+1 query on the list
+    # view. Lets the frontend show a repo's failure reason without relying
+    # on a `?job=<id>` query param that's only set once at submission time
+    # and lost on reload or a shared link.
+    latest_job: JobResponse | None = None

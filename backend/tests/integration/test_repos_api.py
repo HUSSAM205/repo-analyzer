@@ -149,6 +149,62 @@ async def test_get_repo_by_id_returns_404_for_nonexistent_repo():
 
 
 @pytest.mark.asyncio
+async def test_get_repo_by_id_includes_latest_job():
+    # GET /repos/{repo_id} must embed the repo's most recent job (including
+    # its error_message on failure) directly in the response, so the
+    # frontend can show a failure reason without depending on a `?job=<id>`
+    # query param that's only ever set once, at submission time, and is lost
+    # on reload or a shared link.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _register_and_login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"https://github.com/octocat/latest-job-{uuid.uuid4()}"
+        analyze_resp = await client.post(
+            "/api/v1/repos/analyze", json={"repo_url": url}, headers=headers
+        )
+        repo_id = analyze_resp.json()["repo_id"]
+        job_id = analyze_resp.json()["job_id"]
+
+        resp = await client.get(f"/api/v1/repos/{repo_id}", headers=headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["latest_job"] is not None
+        assert body["latest_job"]["id"] == job_id
+        assert body["latest_job"]["status"] == "pending"
+
+        # Once the job fails, latest_job must reflect the failure reason
+        # without requiring a separate GET /jobs/{id} call.
+        async with async_session_maker() as db:
+            job = await db.get(Job, uuid.UUID(job_id))
+            job.status = JobStatus.FAILED
+            job.error_message = "clone failed: repository not found"
+            await db.commit()
+
+        failed_resp = await client.get(f"/api/v1/repos/{repo_id}", headers=headers)
+        assert failed_resp.status_code == 200
+        failed_body = failed_resp.json()
+        assert failed_body["latest_job"]["status"] == "failed"
+        assert failed_body["latest_job"]["error_message"] == "clone failed: repository not found"
+
+
+@pytest.mark.asyncio
+async def test_list_repos_does_not_include_latest_job():
+    # latest_job is only populated by the single-repo detail endpoint --
+    # deliberately not by the list endpoint, to avoid an N+1 query there.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _register_and_login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"https://github.com/octocat/list-no-latest-job-{uuid.uuid4()}"
+        await client.post("/api/v1/repos/analyze", json={"repo_url": url}, headers=headers)
+
+        list_resp = await client.get("/api/v1/repos", headers=headers)
+        assert list_resp.status_code == 200
+        body = list_resp.json()
+        assert len(body) == 1
+        assert body[0]["latest_job"] is None
+
+
+@pytest.mark.asyncio
 async def test_analyze_ready_repo_returns_existing_repo_no_new_job():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first_token = await _register_and_login(client)
