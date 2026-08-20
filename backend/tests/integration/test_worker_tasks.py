@@ -59,11 +59,31 @@ async def test_analyze_repo_task_completes_and_stores_chunks(local_git_repo_url)
         refreshed_job = await db.get(Job, uuid.UUID(job_id))
         assert refreshed_job.status == JobStatus.COMPLETED
         assert refreshed_job.progress == 100
+        assert refreshed_job.stage == "completed"
 
         result = await db.execute(select(CodeChunk).where(CodeChunk.repo_id == repo_id))
         chunks = result.scalars().all()
         assert len(chunks) > 0
         assert any(c.symbol_name == "greet" for c in chunks)
+
+        # The domain briefing is generated as part of the "parsing" stage
+        # (see app.core.domain_briefing.generate_domain_briefing) and stored
+        # on the repo row. It must always have the deterministic parts
+        # populated -- file_type_distribution and tech_stack_badges never
+        # depend on the LLM call succeeding -- and, since this test runs
+        # against the real configured LLM provider (not mocked, per this
+        # test's existing `slow`/`integration` markers), the qualitative
+        # fields should also be populated rather than falling back to the
+        # generic "Unclassified" briefing.
+        refreshed_repo = await db.get(Repo, repo_id)
+        briefing = refreshed_repo.domain_briefing
+        assert briefing is not None
+        assert isinstance(briefing["file_type_distribution"], list)
+        assert briefing["file_type_distribution"]
+        assert isinstance(briefing["tech_stack_badges"], list)
+        assert briefing["primary_field"]
+        assert briefing["target_audience"]
+        assert briefing["architecture_overview"]
 
         for chunk in chunks:
             await db.delete(chunk)
@@ -206,9 +226,119 @@ async def test_analyze_repo_task_marks_failed_on_bad_url():
         refreshed_job = await db.get(Job, uuid.UUID(job_id))
         assert refreshed_job.status == JobStatus.FAILED
         assert refreshed_job.error_message is not None
+        # The job never got past the clone step, so its stage should still
+        # read "cloning" (set right before clone_repo is called) -- it must
+        # not have silently advanced to "parsing".
+        assert refreshed_job.stage == "cloning"
 
         await db.delete(refreshed_job)
         refreshed_repo = await db.get(Repo, repo_id)
+        await db.delete(refreshed_repo)
+        refreshed_user = await db.get(User, user_id)
+        await db.delete(refreshed_user)
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_analyze_repo_task_progresses_through_all_four_stages_in_order(monkeypatch):
+    # The heavy steps (clone_repo, walk_and_chunk, embed_chunks) and the LLM
+    # call are stubbed out here so this test can verify the full stage
+    # sequence -- "cloning" -> "parsing" -> "embedding" -> "completed" --
+    # without paying for a real clone, the real CodeBERT model, or a real
+    # LLM call (those are already exercised end-to-end, unmocked, by
+    # test_analyze_repo_task_completes_and_stores_chunks above).
+    from app.core.chunker import Chunk
+    from app.core.ingestion import ChunkWithEmbedding, WalkedFile, WalkResult
+    from app.core.llm import FakeLLMClient, ScriptedTurn
+    from app.db.models import File
+    from app.workers import tasks as tasks_module
+
+    async with async_session_maker() as db:
+        user = User(email=f"worker-{uuid.uuid4()}@example.com", hashed_password="hashed")
+        db.add(user)
+        await db.flush()
+
+        repo = Repo(user_id=user.id, url="https://example.com/fake/stage-repo", name="fake-repo", status=RepoStatus.PENDING)
+        db.add(repo)
+        await db.flush()
+
+        job = Job(repo_id=repo.id, status=JobStatus.PENDING)
+        db.add(job)
+        await db.commit()
+        job_id = str(job.id)
+        repo_id = repo.id
+        user_id = user.id
+
+    def fake_clone_repo(url, dest_dir, max_size_mb, timeout_seconds):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        return dest_dir
+
+    fake_chunk = Chunk(
+        file_path="main.py", symbol_name="greet", node_type="function", start_line=1, end_line=2,
+        content="def greet(): pass",
+    )
+    fake_walk_result = WalkResult(
+        chunks=[fake_chunk],
+        files=[WalkedFile(path="main.py", content="def greet(): pass")],
+        files_processed=1,
+        files_skipped=0,
+    )
+
+    def fake_walk_and_chunk(root_dir, max_files):
+        return fake_walk_result
+
+    def fake_embed_chunks(chunks, batch_size=8):
+        return [ChunkWithEmbedding(chunk=c, embedding=[0.0] * 768) for c in chunks]
+
+    briefing_json = (
+        '{"primary_field": "Test", "target_audience": "Testers", '
+        '"architecture_overview": "Test overview.", "tech_stack_badges": []}'
+    )
+
+    monkeypatch.setattr(tasks_module, "clone_repo", fake_clone_repo)
+    monkeypatch.setattr(tasks_module, "walk_and_chunk", fake_walk_and_chunk)
+    monkeypatch.setattr(tasks_module, "embed_chunks", fake_embed_chunks)
+    monkeypatch.setattr(
+        tasks_module, "get_llm_client", lambda: FakeLLMClient(turns=[ScriptedTurn(text=briefing_json)])
+    )
+
+    observed_stages: list[str | None] = []
+    original_commit = AsyncSession.commit
+
+    async def recording_commit(self, *args, **kwargs):
+        for obj in self.sync_session.identity_map.values():
+            if isinstance(obj, Job) and str(obj.id) == job_id:
+                observed_stages.append(obj.stage)
+        return await original_commit(self, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "commit", recording_commit)
+    try:
+        await analyze_repo({}, job_id)
+    finally:
+        monkeypatch.undo()
+
+    # Collapse consecutive duplicate observations (multiple commits can
+    # happen while a given stage is still current, e.g. the progress=50
+    # commit right after walk_and_chunk is still "parsing") down to the
+    # unique sequence of stage values actually assigned, in order.
+    unique_in_order = list(dict.fromkeys(observed_stages))
+    assert unique_in_order == ["cloning", "parsing", "embedding", "completed"]
+
+    async with async_session_maker() as db:
+        refreshed_job = await db.get(Job, uuid.UUID(job_id))
+        assert refreshed_job.status == JobStatus.COMPLETED
+        assert refreshed_job.stage == "completed"
+
+        refreshed_repo = await db.get(Repo, repo_id)
+        assert refreshed_repo.domain_briefing["primary_field"] == "Test"
+
+        chunk_result = await db.execute(select(CodeChunk).where(CodeChunk.repo_id == repo_id))
+        for chunk in chunk_result.scalars().all():
+            await db.delete(chunk)
+        file_result = await db.execute(select(File).where(File.repo_id == repo_id))
+        for f in file_result.scalars().all():
+            await db.delete(f)
+        await db.delete(refreshed_job)
         await db.delete(refreshed_repo)
         refreshed_user = await db.get(User, user_id)
         await db.delete(refreshed_user)

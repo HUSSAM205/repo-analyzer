@@ -7,7 +7,9 @@ from uuid import UUID
 from sqlalchemy import delete
 
 from app.config import get_settings
+from app.core.domain_briefing import generate_domain_briefing
 from app.core.ingestion import CloneError, RepoTooLargeError, clone_repo, embed_chunks, walk_and_chunk
+from app.core.llm_providers import get_llm_client
 from app.db.models import CodeChunk, File, Job, JobStatus, NodeType, Repo, RepoStatus
 from app.db.session import async_session_maker
 
@@ -32,6 +34,7 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
         try:
             repo = await db.get(Repo, job.repo_id)
             job.status = JobStatus.RUNNING
+            job.stage = "cloning"
             job.started_at = datetime.now(timezone.utc)
             await db.commit()
 
@@ -42,10 +45,26 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
                     max_size_mb=settings.max_repo_size_mb,
                     timeout_seconds=settings.clone_timeout_seconds,
                 )
+
+                job.stage = "parsing"
+                await db.commit()
+
                 walk_result = await asyncio.to_thread(
                     walk_and_chunk, clone_path, max_files=settings.max_files_per_repo
                 )
                 job.progress = 50
+                await db.commit()
+
+                # Still within the "parsing" stage as far as the user is
+                # concerned -- the AST/chunking walk and the domain briefing
+                # LLM call are presented as one step. stream_chat() is an
+                # async generator doing real async I/O (not a blocking
+                # call), so it's awaited directly rather than routed through
+                # asyncio.to_thread like the CPU-bound/blocking calls above.
+                llm_client = get_llm_client()
+                repo.domain_briefing = await generate_domain_briefing(walk_result, llm_client)
+
+                job.stage = "embedding"
                 await db.commit()
 
                 embedded = await asyncio.to_thread(embed_chunks, walk_result.chunks)
@@ -82,6 +101,7 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
 
                 job.skipped_files = walk_result.files_skipped
                 job.status = JobStatus.COMPLETED
+                job.stage = "completed"
                 job.progress = 100
                 job.finished_at = datetime.now(timezone.utc)
                 repo.status = RepoStatus.READY
