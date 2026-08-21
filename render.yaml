@@ -12,12 +12,29 @@
 # Any envVar marked `sync: false` is a secret Render will prompt you to
 # fill in yourself when applying this blueprint -- nothing sensitive lives
 # in this file.
+#
+# Plan tiers, confirmed against Render's own docs (render.com/docs/free):
+# - web (repo-analyzer-api): `free` is real, but spins down after 15min
+#   idle (~1min cold start on the next request) and caps at 750 instance
+#   hours/month -- fine for evaluation, not a true always-on deployment.
+# - repo-analyzer-postgres: `free` is real, but the database is deleted
+#   30 days after creation (14-day grace period to upgrade first) and
+#   capped at 1GB. Fine to start with; you'll need to upgrade before day 30
+#   for anything you want to keep running.
+# - repo-analyzer-worker: Render has **no free tier for background
+#   workers at all** -- `starter` (paid) is the cheapest option that
+#   exists, not a default I chose. Without it, no repo analysis or
+#   embedding job ever runs (arq app.workers.settings.WorkerSettings).
+# Render explicitly documents free tiers as "not for production
+# applications" -- swap web/postgres to `starter` (or higher) once you're
+# past evaluating this and actually want 24/7 uptime with a persisted
+# database.
 
 databases:
   - name: repo-analyzer-postgres
     databaseName: repoanalyzer
     user: repoanalyzer
-    plan: starter
+    plan: free
     postgresMajorVersion: "16"
     # pgvector isn't enabled by default -- after the database is created,
     # run `CREATE EXTENSION IF NOT EXISTS vector;` via Render's Postgres
@@ -30,7 +47,7 @@ services:
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    plan: starter
+    plan: free
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
@@ -104,6 +121,8 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     dockerCommand: arq app.workers.settings.WorkerSettings
+    # No free tier exists for background workers on Render -- see the
+    # top-of-file note. This is the cheapest plan that's actually available.
     plan: starter
     envVars:
       - key: DATABASE_URL

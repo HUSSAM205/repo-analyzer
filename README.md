@@ -176,10 +176,18 @@ Vercel, independently of any local machine. `render.yaml` at the repo root
 is a Render Blueprint that automates most of this.
 
 **1. Backend on Render**
+- Billing note first: `render.yaml` uses Render's free plan for the API and
+  Postgres (real, but the API spins down after 15min idle and free Postgres
+  is deleted 30 days after creation), and `starter` (paid) for the
+  background worker — Render has no free tier for workers at all, and the
+  worker is what actually runs repo analysis/embedding jobs, so it can't be
+  skipped. A payment method is required for that one service regardless.
 - In the Render dashboard: New -> Blueprint -> point it at this GitHub repo.
   It provisions the `repo-analyzer-postgres` database, the
   `repo-analyzer-api` web service, and the `repo-analyzer-worker` background
-  worker from `render.yaml`.
+  worker from `render.yaml`. This one step (connect + apply) can't be done
+  from the Render CLI — Blueprint provisioning is Dashboard/API-only, the
+  CLI only validates a render.yaml, it doesn't apply one.
 - Enable pgvector once the database exists: open its Shell (or connect with
   any `psql` client) and run `CREATE EXTENSION IF NOT EXISTS vector;` —
   needed before the first deploy's Alembic migration runs.
