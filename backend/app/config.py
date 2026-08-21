@@ -27,6 +27,15 @@ class Settings(BaseSettings):
 
     jwt_private_key_path: str = "keys/jwt_private.pem"
     jwt_public_key_path: str = "keys/jwt_public.pem"
+    # Inline alternative to the file-path settings above -- lets a platform
+    # whose env vars are settable via API/CLI (Render, Railway, etc.) skip
+    # the file-upload step (Render's "Secret Files") entirely. Accepts
+    # either the raw PEM text or a base64 encoding of it (some platforms/
+    # tools mangle embedded newlines in env var values; base64 sidesteps
+    # that). Takes priority over the path settings when set -- see
+    # app/core/security.py's _load_pem.
+    jwt_private_key: str | None = None
+    jwt_public_key: str | None = None
     jwt_algorithm: str = "RS256"
     jwt_access_token_expire_minutes: int = 60
 

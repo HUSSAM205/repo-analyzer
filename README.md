@@ -200,17 +200,18 @@ worth a read before you commit to this path for something beyond a demo.
   for standalone worker services. This one step (connect + apply) can't be
   done from the Render CLI — Blueprint provisioning is Dashboard/API-only,
   the CLI only validates a render.yaml, it doesn't apply one.
-- Generate a JWT keypair and upload it as Secret Files: run
-  `python backend/scripts/generate_keys.py` locally, then in this service's
-  Environment tab upload `backend/keys/jwt_private.pem` and
-  `jwt_public.pem` as Secret Files (Render mounts them at
-  `/etc/secrets/<filename>`, which is what `render.yaml` already points
-  `JWT_PRIVATE_KEY_PATH`/`JWT_PUBLIC_KEY_PATH` at — nothing else to set).
+- Generate a JWT keypair locally: `python backend/scripts/generate_keys.py`
+  writes `backend/keys/jwt_private.pem` and `jwt_public.pem`. Set their
+  contents directly as the `JWT_PRIVATE_KEY`/`JWT_PUBLIC_KEY` env vars
+  (raw PEM text or base64 of it both work — see
+  `app/core/security.py`'s `_load_pem`) rather than uploading Secret
+  Files — plain env vars so the whole setup stays scriptable via the
+  Render API/CLI instead of needing a dashboard file-upload step.
 - Fill in the env vars the blueprint marks as secret (prompted automatically
-  when you apply it): `DATABASE_URL` and `REDIS_URL` from step 1, and
-  `GROQ_API_KEY` at minimum. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
-  `GEMINI_API_KEY` are optional alternates — `get_llm_client()` falls back
-  to whichever has a usable key.
+  when you apply it): `DATABASE_URL` and `REDIS_URL` from step 1,
+  `GROQ_API_KEY` at minimum, and the JWT keys above. `ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY` / `GEMINI_API_KEY` are optional alternates —
+  `get_llm_client()` falls back to whichever has a usable key.
 - Once deployed, confirm `https://<your-service>.onrender.com/health`
   returns `{"status": "ok"}` — this is also the path Render's own uptime
   monitor polls (`healthCheckPath` in `render.yaml`).

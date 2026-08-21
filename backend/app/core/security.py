@@ -1,3 +1,4 @@
+import base64
 import secrets
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -22,14 +23,26 @@ def verify_password(password: str, hashed: str) -> bool:
     return _pwd_context.verify(password, hashed)
 
 
+def _load_pem(inline_value: str | None, file_path: str) -> str:
+    """Loads a PEM key from an inline env var if set (see
+    Settings.jwt_private_key/jwt_public_key), falling back to a file path.
+    The inline value can be the raw PEM text or a base64 encoding of it."""
+    if inline_value:
+        stripped = inline_value.strip()
+        if stripped.startswith("-----BEGIN"):
+            return stripped
+        return base64.b64decode(stripped).decode("utf-8")
+    return (BACKEND_ROOT / file_path).read_text()
+
+
 @lru_cache
 def _private_key() -> str:
-    return (BACKEND_ROOT / settings.jwt_private_key_path).read_text()
+    return _load_pem(settings.jwt_private_key, settings.jwt_private_key_path)
 
 
 @lru_cache
 def _public_key() -> str:
-    return (BACKEND_ROOT / settings.jwt_public_key_path).read_text()
+    return _load_pem(settings.jwt_public_key, settings.jwt_public_key_path)
 
 
 def create_access_token(subject: str, expires_minutes: int | None = None) -> str:

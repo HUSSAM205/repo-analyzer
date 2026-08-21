@@ -50,15 +50,16 @@ services:
       - key: REDIS_URL
         sync: false
       # RS256 keypair -- generate locally with
-      # `python backend/scripts/generate_keys.py`, then upload
-      # backend/keys/jwt_private.pem and jwt_public.pem as Render Secret
-      # Files (Dashboard -> this service -> Environment -> Secret Files).
-      # Render mounts them at /etc/secrets/<filename>, matching the paths
-      # below.
-      - key: JWT_PRIVATE_KEY_PATH
-        value: /etc/secrets/jwt_private.pem
-      - key: JWT_PUBLIC_KEY_PATH
-        value: /etc/secrets/jwt_public.pem
+      # `python backend/scripts/generate_keys.py`, then paste each .pem
+      # file's content (or its base64 -- app/core/security.py's _load_pem
+      # accepts either) directly as these two values. Inline env vars
+      # rather than Render Secret Files specifically so the whole blueprint
+      # can be filled in via plain env vars (API/CLI-settable) with no
+      # dashboard file-upload step.
+      - key: JWT_PRIVATE_KEY
+        sync: false
+      - key: JWT_PUBLIC_KEY
+        sync: false
       - key: JWT_ALGORITHM
         value: RS256
       - key: JWT_ACCESS_TOKEN_EXPIRE_MINUTES
