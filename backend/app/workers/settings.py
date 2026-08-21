@@ -10,9 +10,11 @@ settings = get_settings()
 async def startup(ctx: dict) -> None:
     # Warm the embedding model once when the worker process starts, for the
     # same reason as the API's startup warm-up: avoid a multi-minute
-    # cold-load blocking the first real job.
-    _tokenizer()
-    _model()
+    # cold-load blocking the first real job. Skippable (see Settings.
+    # warm_embedding_model_on_startup) -- see app/main.py's lifespan for why.
+    if settings.warm_embedding_model_on_startup:
+        _tokenizer()
+        _model()
 
 
 class WorkerSettings:

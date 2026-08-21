@@ -50,6 +50,16 @@ class Settings(BaseSettings):
     # chat/annotation requests. Capped well below the host's core count so
     # embedding always leaves real headroom for the rest of the stack.
     embedding_cpu_threads: int = 4
+    # Both the api process (search's query embedding) and the worker
+    # process (bulk repo embedding) eagerly load their own separate copy of
+    # the ~500MB CodeBERT model at startup by default -- fine with two
+    # separate containers, but confirmed live to OOM ("Out of memory (used
+    # over 512Mi)") when both run in one free-tier container together (see
+    # backend/scripts/start_unified.sh). Set false there specifically: the
+    # model still loads correctly on first actual use (embed_texts calls
+    # the same lazily-cached _tokenizer()/_model()), it just pays the cold
+    # -load cost on that first request instead of at startup.
+    warm_embedding_model_on_startup: bool = True
 
     max_repo_size_mb: int = 500
     max_files_per_repo: int = 5000

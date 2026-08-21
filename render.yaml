@@ -108,3 +108,10 @@ services:
         value: "5"
       - key: RATE_LIMIT_CHAT_PER_MINUTE
         value: "15"
+      # Confirmed live: with this unset (both processes eagerly loading
+      # their own ~500MB CodeBERT copy at startup), this exact deployment
+      # OOM'd ("Out of memory (used over 512Mi)") before ever accepting a
+      # request. false here means the model loads lazily on first actual
+      # use instead -- see Settings.warm_embedding_model_on_startup.
+      - key: WARM_EMBEDDING_MODEL_ON_STARTUP
+        value: "false"

@@ -24,9 +24,12 @@ async def lifespan(app: FastAPI):
     # Warm the embedding model at startup so the multi-minute cold
     # load/download happens once during container startup (before the
     # process accepts traffic) instead of blocking the event loop on the
-    # first real search request.
-    _tokenizer()
-    _model()
+    # first real search request. Skippable (see Settings.
+    # warm_embedding_model_on_startup) for a memory-constrained deployment
+    # where this process isn't the only one loading a copy of the model.
+    if settings.warm_embedding_model_on_startup:
+        _tokenizer()
+        _model()
 
     # Surface a fully misconfigured LLM provider at deploy time instead of
     # only discoverable by sending a chat message. Non-blocking: get_llm_client()
