@@ -16,9 +16,7 @@ pytestmark = pytest.mark.integration
 VALID_ANNOTATIONS_JSON = json.dumps(
     [
         {
-            "category": "imports",
-            "start_line": 1,
-            "end_line": 1,
+            "index": 0,
             "logic_summary": "Imports the module needed below.",
             "flow": "No inputs; makes downstream symbols available.",
             "tips": "None apparent",
@@ -146,6 +144,7 @@ async def test_file_annotations_cache_hit_skips_llm_call(monkeypatch):
                 "logic_summary": "Cached summary.",
                 "flow": "Cached flow.",
                 "tips": "None apparent",
+                "source": "ai",
             }
         ]
         async with async_session_maker() as db:
@@ -190,7 +189,13 @@ async def test_file_annotations_cache_miss_success_populates_db(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_file_annotations_cache_miss_failure_returns_503_and_does_not_cache(monkeypatch):
+async def test_file_annotations_cache_miss_llm_failure_returns_200_with_heuristic_blocks(monkeypatch):
+    # The annotation endpoint must never surface a provider failure (a Groq
+    # rate-limit/timeout/transport error, etc.) as a 500/503 -- the user
+    # should always see *some* annotated structure, generated locally via
+    # tree-sitter segmentation, even with AI unavailable. Also confirms the
+    # heuristic-only result is NOT cached, so a later request can retry the
+    # LLM once it recovers.
     class RaisingLLMClient:
         async def stream_chat(self, messages, tools, system_prompt):
             raise ConnectionError("network is down")
@@ -204,8 +209,10 @@ async def test_file_annotations_cache_miss_failure_returns_503_and_does_not_cach
         resp = await client.get(
             f"/api/v1/repos/{repo_id}/files/annotations", params={"path": path}, headers=headers
         )
-        assert resp.status_code == 503
-        assert "unavailable" in resp.json()["detail"].lower()
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["blocks"]) > 0
+        assert all(block["source"] == "heuristic" for block in body["blocks"])
 
         async with async_session_maker() as db:
             result = await db.execute(select(File).where(File.repo_id == uuid.UUID(repo_id), File.path == path))

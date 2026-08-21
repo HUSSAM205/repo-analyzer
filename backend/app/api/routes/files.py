@@ -6,11 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_repo_or_404
-from app.core.code_annotation import (
-    AnnotationUnavailableError,
-    FileTooLargeForAnnotationError,
-    generate_code_annotations,
-)
+from app.core.code_annotation import FileTooLargeForAnnotationError, generate_code_annotations
 from app.core.llm_providers import get_llm_client
 from app.db.models import File, User
 from app.db.session import get_db
@@ -93,15 +89,15 @@ async def get_file_annotations(
         return FileAnnotationsResponse(path=file.path, blocks=file.annotations)
 
     try:
-        blocks = await generate_code_annotations(file.content, file.path, get_llm_client())
+        blocks, used_fallback = await generate_code_annotations(file.content, file.path, get_llm_client())
     except FileTooLargeForAnnotationError as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
-    except AnnotationUnavailableError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI annotation is currently unavailable for this file. Please try again.",
-        ) from exc
 
-    file.annotations = blocks
-    await db.commit()
+    # A heuristic-only result (the AI provider was unavailable) is never
+    # cached -- caching it would permanently freeze out real AI annotations
+    # for this file even after the provider recovers. A partially- or fully
+    # AI-generated result is cached as before.
+    if not used_fallback:
+        file.annotations = blocks
+        await db.commit()
     return FileAnnotationsResponse(path=file.path, blocks=blocks)

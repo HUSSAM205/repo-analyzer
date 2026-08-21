@@ -44,7 +44,16 @@ SYSTEM_PROMPT = (
     "(the file path and line range) for a search_code result, or just "
     "`path/to/file.py` for something you read_file'd in full. If you still "
     "don't have enough information to answer confidently, say so rather than "
-    "speculating."
+    "speculating.\n\n"
+    "Before calling any tool, check whether the conversation history already "
+    "contains what you need -- a prior read_file/search_code/list_directory "
+    "result, or content the user already showed you. A short follow-up like "
+    "'summarize it', 'explain that', or 'what does this do' almost always "
+    "refers to something already loaded earlier in this conversation, not a "
+    "fresh, unrelated question -- answer directly from that existing context "
+    "instead of re-reading the file or re-searching the repository from "
+    "scratch. Only call a tool again if the history genuinely doesn't cover "
+    "what's being asked, or the user is clearly pointing at something new."
 )
 
 # 5 was too tight for the more deliberate, multi-step search style of the

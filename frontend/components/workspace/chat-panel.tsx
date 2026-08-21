@@ -236,6 +236,11 @@ export function ChatPanel({
             setStreamingText("");
             setStatusText(null);
           } else if (event.type === "error") {
+            // Clear the in-progress bubble -- it was never saved as a real
+            // message (finalText is discarded on this path), so leaving it
+            // on screen next to the error banner reads as a dangling,
+            // half-finished answer with no indication anything went wrong.
+            setStreamingText("");
             setError((event.data as { message?: string }).message ?? "The assistant hit an error.");
             setFailedMessage(content);
             setStatusText(null);
@@ -245,8 +250,10 @@ export function ChatPanel({
       }
       return "success";
     } catch {
+      setStreamingText("");
       setError("Connection lost while streaming the response.");
       setFailedMessage(content);
+      setStatusText(null);
       return "failed";
     }
   }

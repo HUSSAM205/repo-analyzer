@@ -29,6 +29,12 @@ class CodeBlockAnnotation(BaseModel):
     logic_summary: str
     flow: str
     tips: str
+    # "heuristic" means this block's explanation was generated locally
+    # (tree-sitter segmentation + a label, no LLM) because the AI provider
+    # was unavailable -- lets the frontend show an honest "AI unavailable"
+    # indicator instead of presenting it as a full AI analysis. Defaults to
+    # "ai" so annotations cached before this field existed still validate.
+    source: Literal["ai", "heuristic"] = "ai"
 
 
 class FileAnnotationsResponse(BaseModel):

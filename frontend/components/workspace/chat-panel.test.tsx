@@ -248,6 +248,51 @@ describe("ChatPanel error retry", () => {
     expect(messagesPostCount).toBe(1); // no automatic retry
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
+
+  it("clears the in-progress partial answer when the stream errors out mid-response", async () => {
+    // A mid-stream failure (e.g. Groq's stream disconnecting after a few
+    // tokens) must not leave a dangling, never-saved partial assistant
+    // bubble on screen next to the error banner -- that reads as a stuck,
+    // half-finished answer rather than a clean "something went wrong" state.
+    const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([
+            sseFrame("token", { text: "Here is a partial ans" }),
+            sseFrame("error", { message: "The AI provider is currently unavailable. Please try again." }),
+          ]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "Find the answer");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    expect(
+      await screen.findByText("The AI provider is currently unavailable. Please try again.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Here is a partial ans/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("streaming-cursor")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
 });
 
 describe("ChatPanel quick prompts and streaming cursor", () => {

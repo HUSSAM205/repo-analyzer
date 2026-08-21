@@ -583,6 +583,52 @@ async def test_groq_client_switches_to_fallback_model_on_not_found(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_groq_client_switches_to_fallback_model_on_rate_limit(monkeypatch):
+    # Groq's daily per-model token quota can be exhausted mid-session
+    # (confirmed live: "tokens per day (TPD): Limit 200000, Used 199399...
+    # try again in 27m58s") -- a 429/RateLimitError. Retrying the same model
+    # can't succeed until the quota resets, but the fallback model has its
+    # own separate quota, so the client should switch to it immediately
+    # instead of burning its retry budget against an exhausted model.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    class RateLimitError(Exception):
+        status_code = 429
+
+    client = GroqClient(api_key="test-key", model="quota-exhausted-model", fallback_model="working-model")
+    models_seen: list[str] = []
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk("hi")
+
+    async def create(*args, **kwargs):
+        models_seen.append(kwargs["model"])
+        if kwargs["model"] == "quota-exhausted-model":
+            raise RateLimitError("rate limit reached")
+        return fake_stream()
+
+    client._client.chat.completions.create = create
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert models_seen == ["quota-exhausted-model", "working-model"]
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "hi"
+
+
+@pytest.mark.asyncio
 async def test_groq_client_does_not_switch_models_on_a_generic_transient_error(monkeypatch):
     # A non-404 failure (rate limit, connection reset, etc.) is genuinely
     # transient -- the configured model is fine, so retries must keep using

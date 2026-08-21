@@ -43,11 +43,13 @@ _GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 # meaningfully larger prompt than a search_code-only conversation, and 15s
 # genuinely wasn't always enough for Groq to start streaming back (observed
 # live: a real TimeoutError on a 5-tool-call conversation that succeeded
-# cleanly on a fresh retry with the same content). 3 attempts total, with
-# 1s/2s exponential backoff between them -- bounded at roughly
-# 25s+1s+25s+2s+25s = ~78s worst case before falling back to the standard
-# clean error event.
-_GROQ_CONNECT_TIMEOUT_SECONDS = 25.0
+# cleanly on a fresh retry with the same content). Bumped again to 35s after
+# live testing during a period of heavy tool-call usage (several read_file
+# results plus a long system prompt) still occasionally approached the 25s
+# mark. 3 attempts total, with 1s/2s exponential backoff between them --
+# bounded at roughly 35s+1s+35s+2s+35s = ~108s worst case before falling
+# back to the standard clean error event.
+_GROQ_CONNECT_TIMEOUT_SECONDS = 35.0
 _GROQ_MAX_ATTEMPTS = 3
 _GROQ_BACKOFF_BASE_SECONDS = 1.0
 
@@ -241,16 +243,26 @@ class GroqClient(OpenAIClient):
                 # A 404/"model not found" (openai.NotFoundError) means the
                 # configured model id has been retired or renamed on Groq's
                 # side -- retrying the SAME model, with or without backoff,
-                # will 404 every time. Switch once to the configured
+                # will 404 every time. A 429/"rate limit" (openai.
+                # RateLimitError) most often means Groq's per-model *daily*
+                # token quota is exhausted (confirmed live: "tokens per day
+                # (TPD): Limit 200000, Used 199399... try again in 27m58s")
+                # -- backoff measured in seconds can't fix a quota that
+                # resets in tens of minutes, and retrying the same model
+                # would just burn the rest of the attempt budget on a
+                # request that's guaranteed to fail again. Groq tracks quota
+                # per model, so the fallback model has its own separate
+                # budget -- in both cases, switch once to the configured
                 # fallback model and retry immediately (still within the
-                # same attempt budget), rather than burning every remaining
-                # attempt on a model that can never succeed.
+                # same attempt budget) rather than burning every remaining
+                # attempt on a model that can't succeed right now.
                 is_not_found = getattr(exc, "status_code", None) == 404 or type(exc).__name__ == "NotFoundError"
-                if is_not_found and self._fallback_model and not self._switched_to_fallback:
+                is_rate_limited = getattr(exc, "status_code", None) == 429 or type(exc).__name__ == "RateLimitError"
+                if (is_not_found or is_rate_limited) and self._fallback_model and not self._switched_to_fallback:
+                    reason = "not found on Groq (likely retired)" if is_not_found else "rate-limited (daily token quota likely exhausted)"
                     logger.warning(
-                        "GroqClient: model=%s not found on Groq (likely retired) -- "
-                        "switching to fallback model=%s",
-                        self._model, self._fallback_model,
+                        "GroqClient: model=%s %s -- switching to fallback model=%s",
+                        self._model, reason, self._fallback_model,
                     )
                     self._model = self._fallback_model
                     self._switched_to_fallback = True

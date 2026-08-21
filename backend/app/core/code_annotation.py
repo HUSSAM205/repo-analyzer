@@ -1,6 +1,10 @@
 import json
 import logging
 
+from tree_sitter import Node
+from tree_sitter_languages import get_parser
+
+from app.core.ast_parser import language_for_path
 from app.core.llm import LLMClient, Message
 
 logger = logging.getLogger(__name__)
@@ -9,55 +13,50 @@ logger = logging.getLogger(__name__)
 # Size guard
 # ---------------------------------------------------------------------------
 #
-# Unlike domain_briefing (which only samples a file tree + a handful of
-# symbols/README chars), this feature sends a *whole file*, line-numbered,
-# to the LLM. A large file therefore costs much more prompt budget per
-# character than domain_briefing's prompt does. We cap well below a typical
-# 128k-token context window to leave headroom for: the system prompt, the
-# per-line numbering overhead (adds several bytes per line on top of raw
-# content), and a JSON response large enough to describe many blocks.
-# 80,000 characters is roughly 20-25k tokens for source code -- generous for
-# essentially any single source file a human would open in the code viewer,
-# while keeping the request fast and inexpensive. Mirrors the reasoning
-# behind the frontend's MAX_HIGHLIGHT_LENGTH (300KB) guard on Shiki
-# highlighting, sized down for LLM-prompt economics rather than
-# syntax-highlighter performance.
+# This feature sends a whole file's worth of content to the LLM (split across
+# per-block snippets in one batched prompt, see _build_summary_prompt). A
+# large file therefore costs much more prompt budget per character than
+# domain_briefing's prompt does. 80,000 characters is roughly 20-25k tokens
+# for source code -- generous for essentially any single source file a human
+# would open in the code viewer, while keeping the request fast and
+# inexpensive. Mirrors the reasoning behind the frontend's
+# MAX_HIGHLIGHT_LENGTH (300KB) guard on Shiki highlighting, sized down for
+# LLM-prompt economics rather than syntax-highlighter performance.
 MAX_ANNOTATION_CONTENT_LENGTH = 80_000
 
 _VALID_CATEGORIES = {"imports", "config_state", "business_logic", "handlers_endpoints"}
 
-_SYSTEM_PROMPT = (
-    "You are analyzing a single source code file to power an \"Annotated "
-    "View\" code viewer feature. Segment the file into logical blocks and "
-    "explain each one. Respond with strict JSON only -- no markdown code "
-    "fences, no commentary, no text before or after the JSON. The response "
-    "must be a JSON array of block objects. Each block object must have "
-    "exactly these keys: \"category\" (one of exactly these four string "
-    "values: \"imports\", \"config_state\", \"business_logic\", "
-    "\"handlers_endpoints\" -- use no other values), \"start_line\" "
-    "(1-indexed integer, inclusive), \"end_line\" (1-indexed integer, "
-    "inclusive), \"logic_summary\" (1-2 plain-language sentences on what "
-    "this block achieves), \"flow\" (1 sentence on key inputs and expected "
-    "outputs), and \"tips\" (1-2 sentences on edge cases or optimization "
-    "hints, or the literal string \"None apparent\" if there is genuinely "
-    "nothing notable). Blocks should cover the file top-to-bottom with "
-    "non-overlapping, contiguous-ish line ranges -- this is a best-effort "
-    "semantic segmentation, not a precise parser, so exact line boundaries "
-    "need not be perfect. Skip emitting a block for genuinely trivial or "
-    "empty stretches (e.g. blank lines between blocks) rather than forcing "
-    "every single line into some category."
-)
+_IMPORT_NODE_TYPES: dict[str, set[str]] = {
+    "python": {"import_statement", "import_from_statement"},
+    "javascript": {"import_statement"},
+    "typescript": {"import_statement"},
+    "tsx": {"import_statement"},
+    "go": {"import_declaration"},
+    "java": {"import_declaration"},
+}
 
+_DEFINITION_NODE_TYPES: dict[str, set[str]] = {
+    "python": {"function_definition", "class_definition", "decorated_definition"},
+    "javascript": {"function_declaration", "class_declaration", "method_definition"},
+    "typescript": {"function_declaration", "class_declaration", "method_definition"},
+    "tsx": {"function_declaration", "class_declaration", "method_definition"},
+    "go": {"function_declaration", "method_declaration", "type_declaration"},
+    "java": {"class_declaration", "method_declaration", "interface_declaration"},
+}
 
-class AnnotationUnavailableError(Exception):
-    """Raised when AI code annotation could not be produced for a file.
+# Method names that, when called as `something.<method>(...)` at the top
+# level of a file, almost always mean "this is registering an event
+# listener or route handler" (socket.io's `.on`, Express-style
+# `.get`/`.post`/etc, DOM's `.addEventListener`, pub/sub's `.subscribe`) --
+# exactly the "Socket.io event listener" style block a human would call out
+# when reading the file, even though it's neither an import nor a named
+# function/class definition.
+_HANDLER_METHOD_NAMES = {
+    "on", "once", "addEventListener", "get", "post", "put", "delete", "patch",
+    "use", "listen", "subscribe", "route", "handle",
+}
 
-    Covers LLM transport/provider errors as well as malformed/unparseable
-    responses. There is no meaningful deterministic fallback for code
-    segmentation + explanation (unlike domain_briefing's file-type
-    distribution and manifest badges), so callers should surface a clean
-    "annotation unavailable" response rather than fabricating block content.
-    """
+_HANDLER_NAME_HINTS = ("handle", "route", "endpoint", "controller", "listener", "on_")
 
 
 class FileTooLargeForAnnotationError(Exception):
@@ -67,28 +66,251 @@ class FileTooLargeForAnnotationError(Exception):
     """
 
 
-def _numbered_lines(content: str) -> str:
+def _definition_target(node: Node) -> Node:
+    # Python wraps a decorated function/class in a `decorated_definition`
+    # node whose actual function_definition/class_definition is a child --
+    # unwrap it so name/kind extraction looks at the real definition, not
+    # the decorator wrapper.
+    if node.type == "decorated_definition":
+        for child in node.children:
+            if child.type in ("function_definition", "class_definition"):
+                return child
+    return node
+
+
+def _node_name(node: Node, source_bytes: bytes) -> str | None:
+    target = _definition_target(node)
+    name_node = target.child_by_field_name("name")
+    if name_node is not None:
+        return source_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
+    return None
+
+
+def _category_for_definition(node: Node, source_bytes: bytes) -> str:
+    target = _definition_target(node)
+    is_class = "class" in target.type or "interface" in target.type
+    if is_class:
+        return "business_logic"
+
+    text = source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+    header = text.split("\n", 1)[0].lower()
+    if any(hint in header for hint in _HANDLER_NAME_HINTS):
+        return "handlers_endpoints"
+    if "@app." in text[:200] or "@router." in text[:200]:
+        return "handlers_endpoints"
+    return "business_logic"
+
+
+def _is_class_node(node: Node) -> bool:
+    target = _definition_target(node)
+    return "class" in target.type or "interface" in target.type
+
+
+def _find_call_expression(node: Node) -> Node | None:
+    if node.type == "call_expression":
+        return node
+    for child in node.children:
+        found = _find_call_expression(child)
+        if found is not None:
+            return found
+    return None
+
+
+def _handler_call_label(node: Node, source_bytes: bytes) -> str | None:
+    call = _find_call_expression(node)
+    if call is None:
+        return None
+    callee = call.child_by_field_name("function")
+    if callee is None:
+        return None
+    callee_text = source_bytes[callee.start_byte:callee.end_byte].decode("utf-8", errors="replace")
+    method = callee_text.rsplit(".", 1)[-1]
+    if method not in _HANDLER_METHOD_NAMES:
+        return None
+
+    args = call.child_by_field_name("arguments")
+    first_literal: str | None = None
+    if args is not None:
+        for child in args.children:
+            if child.type in ("string", "string_literal", "template_string"):
+                raw = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+                first_literal = raw.strip("'\"`")
+                break
+
+    return f"{method}('{first_literal}')" if first_literal else f"{callee_text}(...)"
+
+
+def _unwrap_export(node: Node) -> Node:
+    # `export function foo() {}` / `export default class {}` / `export const
+    # x = ...` wrap the real statement in an export_statement -- classify the
+    # thing actually being exported, not the wrapper, while still spanning
+    # the whole export statement's line range in the caller.
+    if node.type != "export_statement":
+        return node
+    for child in node.children:
+        if child.type not in ("export", "default"):
+            return child
+    return node
+
+
+def _whole_file_block(total_lines: int) -> dict:
+    return {
+        "category": "business_logic",
+        "node_type": "text",
+        "symbol_name": None,
+        "start_line": 1,
+        "end_line": max(total_lines, 1),
+    }
+
+
+def _local_blocks(content: str, path: str) -> list[dict]:
+    """Split `content` into logical blocks using local (non-LLM) AST parsing.
+
+    Walks the file's top-level statements, categorizing each as an import
+    block, a function/class definition, an event-listener/route-handler call
+    (e.g. `socket.on('connect', ...)`), or a generic top-level statement.
+    Always returns at least one block covering the whole file, even for an
+    unsupported language or a file tree-sitter can't usefully parse.
+    """
     lines = content.splitlines()
-    width = len(str(len(lines))) if lines else 1
-    return "\n".join(f"{i:>{width}}: {line}" for i, line in enumerate(lines, start=1))
+    if not lines:
+        return []
+
+    language = language_for_path(path)
+    if language is None:
+        return [_whole_file_block(len(lines))]
+
+    try:
+        parser = get_parser(language)
+        source_bytes = content.encode("utf-8")
+        tree = parser.parse(source_bytes)
+    except Exception:
+        logger.warning("Local AST segmentation failed for path=%s", path, exc_info=True)
+        return [_whole_file_block(len(lines))]
+
+    top_level = list(tree.root_node.children)
+    if not top_level:
+        return [_whole_file_block(len(lines))]
+
+    import_types = _IMPORT_NODE_TYPES.get(language, set())
+    definition_types = _DEFINITION_NODE_TYPES.get(language, set())
+
+    raw_blocks: list[dict] = []
+    for outer_node in top_level:
+        start_line = outer_node.start_point[0] + 1
+        end_line = outer_node.end_point[0] + 1
+        if end_line < start_line:
+            continue
+
+        node = _unwrap_export(outer_node)
+
+        if node.type in import_types:
+            raw_blocks.append({
+                "category": "imports", "node_type": "import", "symbol_name": None,
+                "start_line": start_line, "end_line": end_line,
+            })
+        elif node.type in definition_types:
+            raw_blocks.append({
+                "category": _category_for_definition(node, source_bytes),
+                "node_type": "class" if _is_class_node(node) else "function",
+                "symbol_name": _node_name(node, source_bytes),
+                "start_line": start_line, "end_line": end_line,
+            })
+        else:
+            handler_label = _handler_call_label(node, source_bytes)
+            if handler_label:
+                raw_blocks.append({
+                    "category": "handlers_endpoints", "node_type": "handler_call",
+                    "symbol_name": handler_label, "start_line": start_line, "end_line": end_line,
+                })
+            else:
+                raw_blocks.append({
+                    "category": "config_state", "node_type": "statement", "symbol_name": None,
+                    "start_line": start_line, "end_line": end_line,
+                })
+
+    return _merge_adjacent_same_kind(raw_blocks) or [_whole_file_block(len(lines))]
 
 
-def _build_prompt(content: str, path: str) -> str:
-    return (
-        f"File path: {path}\n\n"
-        "File contents, with each line prefixed by its 1-indexed line "
-        "number (the \"N: \" prefix is not part of the source -- use it "
-        "only to compute accurate start_line/end_line values):\n\n"
-        f"{_numbered_lines(content)}"
-    )
+def _merge_adjacent_same_kind(raw_blocks: list[dict]) -> list[dict]:
+    # Collapse runs of consecutive imports (or consecutive stray statements)
+    # into one block -- a file with 10 import lines shouldn't produce 10
+    # near-identical "Import statements" blocks. Function/class/handler-call
+    # blocks are each kept distinct even when adjacent, since each is a
+    # meaningfully separate unit worth its own explanation.
+    merged: list[dict] = []
+    for block in raw_blocks:
+        mergeable = block["node_type"] in ("import", "statement")
+        if (
+            mergeable
+            and merged
+            and merged[-1]["category"] == block["category"]
+            and merged[-1]["node_type"] == block["node_type"]
+        ):
+            merged[-1]["end_line"] = block["end_line"]
+        else:
+            merged.append(dict(block))
+    return merged
 
 
-def _parse_llm_json(text: str) -> list[dict]:
+def _heuristic_block(block: dict) -> dict:
+    node_type = block["node_type"]
+    symbol_name = block.get("symbol_name")
+    category = block["category"]
+
+    if node_type == "class":
+        summary = f"Class: {symbol_name}" if symbol_name else "Class definition"
+    elif node_type == "function":
+        summary = f"Function: {symbol_name}" if symbol_name else "Function definition"
+    elif node_type == "handler_call":
+        summary = f"Event/route handler: {symbol_name}" if symbol_name else "Event/route handler"
+    elif node_type == "import":
+        summary = "Import statements"
+    elif category == "config_state":
+        summary = "Setup / top-level configuration"
+    else:
+        summary = "Code block"
+
+    return {
+        "category": category,
+        "start_line": block["start_line"],
+        "end_line": block["end_line"],
+        "logic_summary": summary,
+        "flow": "AI explanation is temporarily unavailable -- showing detected code structure only.",
+        "tips": "None apparent",
+        "source": "heuristic",
+    }
+
+
+_SUMMARY_SYSTEM_PROMPT = (
+    "You are annotating a source code file that has already been split into "
+    "numbered blocks for an \"Annotated View\" code viewer feature. For each "
+    "block, write a short explanation. Respond with strict JSON only -- no "
+    "markdown code fences, no commentary, no text before or after the JSON. "
+    "The response must be a JSON array. Each element must have exactly these "
+    "keys: \"index\" (the integer block index as given), \"logic_summary\" "
+    "(1-2 plain-language sentences on what this block achieves), \"flow\" "
+    "(1 sentence on key inputs and expected outputs), and \"tips\" (1-2 "
+    "sentences on edge cases or optimization hints, or the literal string "
+    "\"None apparent\" if there is genuinely nothing notable). Include every "
+    "block index exactly once."
+)
+
+
+def _build_summary_prompt(blocks: list[dict], content_lines: list[str], path: str) -> str:
+    parts = [f"File path: {path}\n"]
+    for i, block in enumerate(blocks):
+        snippet = "\n".join(content_lines[block["start_line"] - 1:block["end_line"]])
+        parts.append(
+            f"--- Block {i} (category={block['category']}, lines "
+            f"{block['start_line']}-{block['end_line']}) ---\n{snippet}\n"
+        )
+    return "\n".join(parts)
+
+
+def _parse_summary_json(text: str) -> dict[int, dict]:
     stripped = text.strip()
     if stripped.startswith("```"):
-        # Models sometimes wrap "strict JSON only" output in a markdown
-        # fence anyway. Strip the opening fence (with optional language
-        # tag, e.g. "```json") and the closing fence.
         stripped = stripped[3:]
         if stripped[:4].lower() == "json":
             stripped = stripped[4:]
@@ -100,45 +322,47 @@ def _parse_llm_json(text: str) -> list[dict]:
     if not isinstance(parsed, list):
         raise ValueError("LLM response was not a JSON array")
 
-    blocks: list[dict] = []
+    # Lenient per-item parsing: a malformed or missing individual entry just
+    # means that one block falls back to a heuristic label (see
+    # generate_code_annotations) -- it must not take down every other block
+    # in the file that the model summarized correctly.
+    summaries: dict[int, dict] = {}
     for item in parsed:
         if not isinstance(item, dict):
-            raise ValueError("LLM response contained a non-object block")
-
-        for key in ("category", "start_line", "end_line", "logic_summary", "flow", "tips"):
-            if key not in item:
-                raise ValueError(f"LLM response block missing required key: {key}")
-
-        category = item["category"]
-        if category not in _VALID_CATEGORIES:
-            raise ValueError(f"LLM response block had invalid category: {category!r}")
-
-        blocks.append(
-            {
-                "category": category,
-                "start_line": int(item["start_line"]),
-                "end_line": int(item["end_line"]),
+            continue
+        try:
+            index = int(item["index"])
+            summaries[index] = {
                 "logic_summary": str(item["logic_summary"]),
                 "flow": str(item["flow"]),
                 "tips": str(item["tips"]),
             }
-        )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return summaries
 
-    return blocks
 
+async def generate_code_annotations(content: str, path: str, llm_client: LLMClient) -> tuple[list[dict], bool]:
+    """Segment `content` into logical blocks and explain each one.
 
-async def generate_code_annotations(content: str, path: str, llm_client: LLMClient) -> list[dict]:
-    """Segment `content` into logical blocks with AI-generated explanations.
+    Segmentation always happens locally first (tree-sitter, see
+    _local_blocks) -- imports, function/class definitions, and
+    event-listener/route-handler calls are detected deterministically before
+    any LLM is involved. The LLM is then asked only to summarize the
+    already-segmented blocks (a smaller, more constrained task than the
+    original single-shot "segment AND explain" prompt).
 
-    Returns a list of block dicts shaped exactly like `CodeBlockAnnotation`
-    in app.schemas.files. This is fundamentally an LLM task -- there is no
-    meaningful deterministic fallback (unlike domain_briefing), so any
-    failure raises rather than returning fabricated content:
+    This function never raises for an LLM failure -- a Groq timeout, rate
+    limit, transport error, or malformed/partial JSON response all degrade to
+    locally-generated heuristic labels (e.g. "Function: sendMessage",
+    "Event/route handler: on('connect')") so the caller always has something
+    to show. FileTooLargeForAnnotationError is the only case that still
+    raises, since it's a distinct, informative state (not a failure) and is
+    checked before any LLM call.
 
-    - FileTooLargeForAnnotationError if `content` exceeds
-      MAX_ANNOTATION_CONTENT_LENGTH. Raised before any LLM call.
-    - AnnotationUnavailableError on any LLM transport/provider error, or a
-      malformed/unparseable response.
+    Returns (blocks, used_fallback). `used_fallback` is True only when the
+    LLM contributed nothing at all (so the caller knows not to cache a
+    heuristic-only result -- a later request should retry the LLM).
     """
     if len(content) > MAX_ANNOTATION_CONTENT_LENGTH:
         raise FileTooLargeForAnnotationError(
@@ -146,13 +370,19 @@ async def generate_code_annotations(content: str, path: str, llm_client: LLMClie
             f"{MAX_ANNOTATION_CONTENT_LENGTH}-character limit for AI annotation."
         )
 
+    local_blocks = _local_blocks(content, path)
+    heuristic_blocks = [_heuristic_block(b) for b in local_blocks]
+    if not local_blocks:
+        return heuristic_blocks, True
+
     try:
-        prompt = _build_prompt(content, path)
+        content_lines = content.splitlines()
+        prompt = _build_summary_prompt(local_blocks, content_lines, path)
         messages = [Message(role="user", content=prompt)]
 
         accumulated = ""
         llm_error: str | None = None
-        async for event in llm_client.stream_chat(messages, tools=[], system_prompt=_SYSTEM_PROMPT):
+        async for event in llm_client.stream_chat(messages, tools=[], system_prompt=_SUMMARY_SYSTEM_PROMPT):
             if event.type == "token":
                 accumulated += event.token or ""
             elif event.type == "error":
@@ -161,9 +391,27 @@ async def generate_code_annotations(content: str, path: str, llm_client: LLMClie
         if llm_error is not None:
             raise RuntimeError(f"LLM provider returned an error: {llm_error}")
 
-        return _parse_llm_json(accumulated)
-    except FileTooLargeForAnnotationError:
-        raise
-    except Exception as exc:
-        logger.warning("Code annotation LLM call failed for path=%s", path, exc_info=True)
-        raise AnnotationUnavailableError(f"AI annotation is currently unavailable for {path}") from exc
+        summaries = _parse_summary_json(accumulated)
+    except Exception:
+        logger.warning(
+            "Code annotation LLM summarization failed for path=%s -- using local heuristic fallback",
+            path, exc_info=True,
+        )
+        return heuristic_blocks, True
+
+    result: list[dict] = []
+    for i, block in enumerate(local_blocks):
+        summary = summaries.get(i)
+        if summary is None:
+            result.append(heuristic_blocks[i])
+        else:
+            result.append({
+                "category": block["category"],
+                "start_line": block["start_line"],
+                "end_line": block["end_line"],
+                "logic_summary": summary["logic_summary"],
+                "flow": summary["flow"],
+                "tips": summary["tips"],
+                "source": "ai",
+            })
+    return result, False
