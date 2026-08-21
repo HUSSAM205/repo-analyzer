@@ -657,3 +657,169 @@ async def test_groq_client_does_not_switch_models_on_a_generic_transient_error(m
     assert models_seen == ["primary-model"] * llm_providers_module._GROQ_MAX_ATTEMPTS
     assert events[-1].type == "error"
     assert events[-1].type == "error"
+
+
+def _patch_fake_ollama(monkeypatch, response_text: str | None = None, should_fail: bool = False):
+    """Patches llm_providers.AsyncOpenAI so any client constructed while
+    this is active (i.e. the OllamaClient GroqClient builds internally) gets
+    a fake completions.create instead of making a real network call."""
+    import app.core.llm_providers as llm_providers_module
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk(response_text or "")
+
+    class FakeCompletions:
+        async def create(self, *args, **kwargs):
+            if should_fail:
+                raise RuntimeError("ollama connection refused")
+            return fake_stream()
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeAsyncOpenAI:
+        def __init__(self, *args, **kwargs):
+            self.chat = FakeChat()
+
+    monkeypatch.setattr(llm_providers_module, "AsyncOpenAI", FakeAsyncOpenAI)
+
+
+@pytest.mark.asyncio
+async def test_groq_client_fails_over_to_local_ollama_when_cloud_fails_before_any_content(monkeypatch):
+    # The core ask this fallback exists for: Groq exhausted (rate limit,
+    # outage, whatever) before a single token reached the caller -- a local
+    # Ollama server should transparently take over rather than surfacing
+    # "The AI provider is currently unavailable."
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(
+        api_key="test-key", model="primary-model", fallback_model=None,
+        local_fallback_model="qwen2.5-coder:7b", local_fallback_base_url="http://fake-ollama/v1",
+    )
+
+    async def groq_always_fails(*args, **kwargs):
+        raise RuntimeError("groq is down")
+
+    client._client.chat.completions.create = groq_always_fails
+    _patch_fake_ollama(monkeypatch, response_text="hello from ollama")
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert not any(e.type == "error" for e in events)
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "hello from ollama"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_does_not_fail_over_once_content_already_streamed(monkeypatch):
+    # Mirrors the existing never-retry-mid-stream rule: once real tokens
+    # already reached the caller, switching providers now would risk a
+    # duplicated or inconsistent answer -- must surface the plain error
+    # instead of silently starting over on Ollama.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(
+        api_key="test-key", model="primary-model", fallback_model=None,
+        local_fallback_model="qwen2.5-coder:7b", local_fallback_base_url="http://fake-ollama/v1",
+    )
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def dies_midway():
+        yield FakeChunk("partial ")
+        raise RuntimeError("connection dropped mid-stream")
+
+    async def groq_create(*args, **kwargs):
+        return dies_midway()
+
+    client._client.chat.completions.create = groq_create
+    # Left un-patched deliberately: if the fallback path were mistakenly
+    # taken here, OllamaClient would attempt a real network call and this
+    # test would hang/error very differently than the assertion below.
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert events[0].type == "token"
+    assert events[0].token == "partial "
+    assert events[-1].type == "error"
+    assert events[-1].error == llm_providers_module._PROVIDER_ERROR_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_groq_client_surfaces_plain_error_when_no_local_fallback_configured(monkeypatch):
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(api_key="test-key", model="primary-model", fallback_model=None, local_fallback_model=None)
+
+    async def groq_always_fails(*args, **kwargs):
+        raise RuntimeError("groq is down")
+
+    client._client.chat.completions.create = groq_always_fails
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert events[-1].type == "error"
+    assert events[-1].error == llm_providers_module._PROVIDER_ERROR_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_groq_client_surfaces_local_fallback_unavailable_message_when_both_fail(monkeypatch):
+    # Neither the cloud provider nor the local Ollama fallback are reachable
+    # (e.g. Ollama isn't running) -- the user should see an honest, specific
+    # message rather than the generic cloud-only error text.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(
+        api_key="test-key", model="primary-model", fallback_model=None,
+        local_fallback_model="qwen2.5-coder:7b", local_fallback_base_url="http://fake-ollama/v1",
+    )
+
+    async def groq_always_fails(*args, **kwargs):
+        raise RuntimeError("groq is down")
+
+    client._client.chat.completions.create = groq_always_fails
+    _patch_fake_ollama(monkeypatch, should_fail=True)
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert events[-1].type == "error"
+    assert events[-1].error == llm_providers_module._LOCAL_FALLBACK_UNAVAILABLE_MESSAGE

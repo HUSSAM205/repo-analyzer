@@ -6,6 +6,7 @@ from tree_sitter_languages import get_parser
 
 from app.core.ast_parser import language_for_path
 from app.core.llm import LLMClient, Message
+from app.core.token_budget import MAX_CONTEXT_CHARS, sanitize_context
 
 logger = logging.getLogger(__name__)
 
@@ -299,12 +300,25 @@ _SUMMARY_SYSTEM_PROMPT = (
 
 def _build_summary_prompt(blocks: list[dict], content_lines: list[str], path: str) -> str:
     parts = [f"File path: {path}\n"]
+    # Keeps the batched prompt within the shared repo-context token budget
+    # (see token_budget.py) regardless of how many blocks a file has --
+    # confirmed live, a single unbounded annotation prompt for a ~1400-line
+    # file hit Groq's "tokens per minute" 413 limit. Blocks left out here
+    # simply have no entry in the LLM's response, and
+    # generate_code_annotations already falls back to a heuristic label for
+    # any block index missing from that response, so no extra bookkeeping
+    # is needed for the blocks this loop drops.
+    budget_remaining = MAX_CONTEXT_CHARS
     for i, block in enumerate(blocks):
-        snippet = "\n".join(content_lines[block["start_line"] - 1:block["end_line"]])
-        parts.append(
+        snippet = sanitize_context("\n".join(content_lines[block["start_line"] - 1:block["end_line"]]))
+        block_text = (
             f"--- Block {i} (category={block['category']}, lines "
             f"{block['start_line']}-{block['end_line']}) ---\n{snippet}\n"
         )
+        if len(block_text) > budget_remaining:
+            break
+        parts.append(block_text)
+        budget_remaining -= len(block_text)
     return "\n".join(parts)
 
 

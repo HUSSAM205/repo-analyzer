@@ -7,6 +7,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.embeddings import embed_text
 from app.core.llm import ToolSpec
 from app.core.search import hybrid_search
+from app.core.token_budget import MAX_CONTEXT_TOKENS, truncate_to_token_budget
 from app.db.models import File
 
 SEARCH_CODE_TOOL_SPEC = ToolSpec(
@@ -63,12 +64,6 @@ READ_FILE_TOOL_SPEC = ToolSpec(
 
 ALL_TOOL_SPECS = [SEARCH_CODE_TOOL_SPEC, LIST_DIRECTORY_TOOL_SPEC, READ_FILE_TOOL_SPEC]
 
-# A single read_file call returning the model's entire remaining context
-# budget would be self-defeating -- this is generous for one file (roughly
-# 5k tokens) while leaving real room for conversation history, other tool
-# results, and the response itself.
-MAX_READ_FILE_CHARS = 20_000
-
 
 async def search_code(db: AsyncSession, repo_id: UUID, query: str, limit: int = 5) -> str:
     query_embedding = await run_in_threadpool(embed_text, query)
@@ -80,7 +75,11 @@ async def search_code(db: AsyncSession, repo_id: UUID, query: str, limit: int = 
     for r in results:
         symbol = f" ({r.symbol_name})" if r.symbol_name else ""
         blocks.append(f"### {r.file_path}:{r.start_line}-{r.end_line}{symbol}\n```\n{r.content}\n```")
-    return "\n\n".join(blocks)
+    # Several chunks concatenated (up to `limit`) can add up well past a
+    # single tool result's fair share of a request's token budget -- see
+    # token_budget.py for why this cap exists (a 413 "tokens per minute"
+    # failure this was added to prevent).
+    return truncate_to_token_budget("\n\n".join(blocks), MAX_CONTEXT_TOKENS)
 
 
 async def list_directory(db: AsyncSession, repo_id: UUID, path: str = "") -> str:
@@ -118,9 +117,5 @@ async def read_file(db: AsyncSession, repo_id: UUID, path: str) -> str:
     if file is None:
         return f"No such file: {path!r}. Use list_directory or search_code to find the correct path."
 
-    content = file.content
-    if len(content) > MAX_READ_FILE_CHARS:
-        omitted = len(content) - MAX_READ_FILE_CHARS
-        content = content[:MAX_READ_FILE_CHARS] + f"\n... (truncated, {omitted} more characters not shown)"
-
+    content = truncate_to_token_budget(file.content, MAX_CONTEXT_TOKENS)
     return f"### {path}\n```\n{content}\n```"

@@ -2,7 +2,8 @@ import uuid
 
 import pytest
 
-from app.core.agent_tools import MAX_READ_FILE_CHARS, list_directory, read_file
+from app.core.agent_tools import list_directory, read_file
+from app.core.token_budget import MAX_CONTEXT_CHARS
 from app.db.models import File, Repo, RepoStatus, User
 
 # Unlike search_code (tests/integration/test_agent_tools.py), these tools are
@@ -115,9 +116,9 @@ async def test_read_file_reports_a_clear_message_for_a_nonexistent_file(db_sessi
 
 
 @pytest.mark.asyncio
-async def test_read_file_truncates_content_over_the_size_cap(db_session):
+async def test_read_file_truncates_content_over_the_token_budget(db_session):
     repo = await _make_repo(db_session)
-    huge_content = "x" * (MAX_READ_FILE_CHARS + 5_000)
+    huge_content = "x" * (MAX_CONTEXT_CHARS + 5_000)
     db_session.add(File(repo_id=repo.id, path="huge.txt", content=huge_content))
     await db_session.flush()
 
@@ -125,7 +126,7 @@ async def test_read_file_truncates_content_over_the_size_cap(db_session):
 
     assert len(result) < len(huge_content)
     assert "truncated" in result
-    assert "5000 more characters" in result or "5,000 more characters" in result
+    assert "context budget" in result
 
 
 @pytest.mark.asyncio

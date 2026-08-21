@@ -53,6 +53,21 @@ _GROQ_CONNECT_TIMEOUT_SECONDS = 35.0
 _GROQ_MAX_ATTEMPTS = 3
 _GROQ_BACKOFF_BASE_SECONDS = 1.0
 
+# Ollama's OpenAI-compatible endpoint, used as GroqClient's last-resort
+# local fallback when the cloud provider is exhausted/unreachable (see
+# GroqClient.stream_chat). `host.docker.internal` is the standard Docker
+# Desktop DNS name a container uses to reach services running on the host
+# -- works out of the box on Docker Desktop for Windows/Mac (this
+# deployment's target); a Linux host needs an `extra_hosts` entry, added in
+# docker-compose.yml for that reason.
+_OLLAMA_DEFAULT_BASE_URL = "http://host.docker.internal:11434/v1"
+
+_LOCAL_FALLBACK_UNAVAILABLE_MESSAGE = (
+    "The cloud AI provider is temporarily rate-limited, and the local "
+    "Ollama fallback is not reachable. Start Ollama locally (or wait for "
+    "the cloud provider's quota to reset) and try again."
+)
+
 
 def _to_anthropic_messages(messages: list[Message]) -> list[dict]:
     result: list[dict] = []
@@ -206,8 +221,30 @@ class OpenAIClient:
             yield LLMEvent(type="error", error=_PROVIDER_ERROR_MESSAGE)
 
 
+class OllamaClient(OpenAIClient):
+    """Talks to a local Ollama server via its OpenAI-compatible endpoint.
+
+    Used as GroqClient's last-resort local fallback (see
+    GroqClient.stream_chat) -- same message/tool-call translation and
+    streaming logic as any other OpenAI-compatible provider, just pointed at
+    a local base_url. Ollama accepts any non-empty string as an API key (it
+    doesn't check it); "ollama" is the placeholder Ollama's own docs use.
+    """
+
+    def __init__(self, model: str, base_url: str):
+        self._client = AsyncOpenAI(api_key="ollama", base_url=base_url, timeout=_CLIENT_TIMEOUT_SECONDS)
+        self._model = model
+
+
 class GroqClient(OpenAIClient):
-    def __init__(self, api_key: str, model: str, fallback_model: str | None = None):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        fallback_model: str | None = None,
+        local_fallback_model: str | None = None,
+        local_fallback_base_url: str = _OLLAMA_DEFAULT_BASE_URL,
+    ):
         # Deliberately does not call super().__init__(): that constructs an
         # AsyncOpenAI client with no base_url override (real OpenAI). Groq
         # needs its own base_url but the exact same message/tool-call
@@ -217,6 +254,10 @@ class GroqClient(OpenAIClient):
         self._model = model
         self._fallback_model = fallback_model
         self._switched_to_fallback = False
+        # None disables the local fallback entirely (e.g. an environment
+        # with no Ollama server) -- see get_llm_client()/config.py.
+        self._local_fallback_model = local_fallback_model
+        self._local_fallback_base_url = local_fallback_base_url
 
     async def _get_stream(self, openai_messages: list[dict], openai_tools: list[dict]):
         # Retries only the stream-establishment call (see the base class'
@@ -268,6 +309,55 @@ class GroqClient(OpenAIClient):
                     self._switched_to_fallback = True
         assert last_exc is not None
         raise last_exc
+
+    async def stream_chat(
+        self, messages: list[Message], tools: list[ToolSpec], system_prompt: str
+    ) -> AsyncIterator[LLMEvent]:
+        # The cloud attempt first, exactly as before (including the
+        # connect-retry/model-switch logic in _get_stream above).
+        # OpenAIClient.stream_chat never raises -- it catches everything
+        # internally and yields an "error" event instead -- so failure here
+        # is detected by watching for that event, not by catching an
+        # exception.
+        cloud_failed = False
+        yielded_real_content = False
+        async for event in super().stream_chat(messages, tools, system_prompt):
+            if event.type == "error":
+                cloud_failed = True
+                break
+            if event.type in ("token", "tool_call"):
+                yielded_real_content = True
+            yield event
+
+        if not cloud_failed:
+            return
+
+        # Once real content has already reached the caller, failing over to
+        # a different provider now would risk a duplicated or inconsistent
+        # answer -- the same reason the connect-retry above only ever
+        # retries the pre-stream connect step, never a mid-stream failure.
+        # Surface the plain error instead in that case, or when no local
+        # fallback is configured at all.
+        if yielded_real_content or not self._local_fallback_model:
+            yield LLMEvent(type="error", error=_PROVIDER_ERROR_MESSAGE)
+            return
+
+        logger.warning(
+            "GroqClient: cloud provider unavailable -- failing over to local "
+            "Ollama fallback (model=%s, base_url=%s)",
+            self._local_fallback_model, self._local_fallback_base_url,
+        )
+        try:
+            local_client = OllamaClient(model=self._local_fallback_model, base_url=self._local_fallback_base_url)
+            async for event in local_client.stream_chat(messages, tools, system_prompt):
+                if event.type == "error":
+                    logger.warning("GroqClient: local Ollama fallback is also unavailable")
+                    yield LLMEvent(type="error", error=_LOCAL_FALLBACK_UNAVAILABLE_MESSAGE)
+                    return
+                yield event
+        except Exception:
+            logger.exception("GroqClient: local Ollama fallback raised unexpectedly")
+            yield LLMEvent(type="error", error=_LOCAL_FALLBACK_UNAVAILABLE_MESSAGE)
 
 
 def _to_gemini_contents(
@@ -418,6 +508,8 @@ def _build_provider_client(current_settings, provider: str):
             api_key=current_settings.groq_api_key,
             model=current_settings.groq_model,
             fallback_model=current_settings.groq_fallback_model,
+            local_fallback_model=current_settings.ollama_model or None,
+            local_fallback_base_url=current_settings.ollama_base_url,
         )
     return AnthropicClient(api_key=current_settings.anthropic_api_key, model=current_settings.anthropic_model)
 

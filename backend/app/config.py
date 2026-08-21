@@ -90,6 +90,17 @@ class Settings(BaseSettings):
     groq_model: str = "qwen/qwen3.6-27b"
     groq_fallback_model: str | None = "openai/gpt-oss-20b"
 
+    # Last-resort local fallback when Groq is rate-limited or unreachable
+    # (see GroqClient.stream_chat) -- an empty string disables it (treated
+    # as None by _build_provider_client), e.g. for a deployment with no
+    # Ollama server. qwen2.5-coder is the default rather than deepseek-r1
+    # because this fallback must support tool calling (search_code/
+    # list_directory/read_file) -- confirmed against a real local Ollama
+    # instance: qwen2.5-coder:7b reports "tools" in its capabilities,
+    # deepseek-r1:7b does not.
+    ollama_base_url: str = "http://host.docker.internal:11434/v1"
+    ollama_model: str = "qwen2.5-coder:7b"
+
 
 @lru_cache
 def get_settings() -> Settings:

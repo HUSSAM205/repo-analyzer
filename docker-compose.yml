@@ -46,10 +46,19 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.6-27b}
       GROQ_FALLBACK_MODEL: ${GROQ_FALLBACK_MODEL:-openai/gpt-oss-20b}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
     ports:
       - "8000:8000"
     volumes:
       - ./backend/keys:/app/keys
+    # Lets this container reach a local Ollama server on the host machine
+    # via "host.docker.internal" (see GroqClient's local fallback in
+    # app/core/llm_providers.py) -- Docker Desktop (Windows/Mac) wires this
+    # up automatically, but plain Docker Engine on Linux needs it declared
+    # explicitly.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,6 +84,8 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.6-27b}
       GROQ_FALLBACK_MODEL: ${GROQ_FALLBACK_MODEL:-openai/gpt-oss-20b}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
     # Hard backstop on top of embedding_cpu_threads (app/config.py): even if
     # a future change forgets to respect that setting, the container itself
     # is capped so bulk embedding can no longer consume every host core and
