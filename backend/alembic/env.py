@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.config import get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
 from app.db import models  # noqa: E402,F401
+from app.db.url import strip_libpq_params  # noqa: E402
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -32,7 +33,13 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 _settings = get_settings()
-config.set_main_option("sqlalchemy.url", _settings.database_url)
+# Builds its own engine independently of app/db/session.py (see
+# run_async_migrations below), so it needs the same libpq-param handling --
+# confirmed live against a real Neon database: without this, Alembic fails
+# with "TypeError: connect() got an unexpected keyword argument 'sslmode'"
+# even though the app's own engine already handled it correctly.
+_database_url, _ssl_required = strip_libpq_params(_settings.database_url)
+config.set_main_option("sqlalchemy.url", _database_url)
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -81,6 +88,7 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={"ssl": True} if _ssl_required else {},
     )
 
     async with connectable.connect() as connection:
