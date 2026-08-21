@@ -4,6 +4,33 @@
 
 @layer base {
   :root {
+    /* Light theme -- clean, minimal white/gray, default in the CSS cascade
+       sense (no class needed), but the app's actual runtime default is
+       "dark" (see app/layout.tsx's ThemeProvider defaultTheme) so existing
+       users/screenshots don't see a surprise light flash. */
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --border: 240 5.9% 88%;
+    --input: 240 5.9% 88%;
+    --ring: 217 91% 55%;
+    --primary: 217 91% 55%;
+    --primary-foreground: 210 20% 98%;
+    --secondary: 240 4.8% 95.5%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.5%;
+    --muted-foreground: 240 3.8% 42%;
+    --accent: 240 4.8% 95.5%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 210 20% 98%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    /* Dark theme -- deep slate / "cyber-zinc", the app's original and
+       still-default look. */
     --background: 240 10% 3.9%;   /* zinc-950 */
     --foreground: 240 4.8% 95.9%; /* zinc-100 */
     --card: 240 5.9% 10%;         /* zinc-900 */
@@ -21,7 +48,6 @@
     --accent-foreground: 240 4.8% 95.9%;
     --destructive: 0 72% 51%;
     --destructive-foreground: 210 20% 98%;
-    --radius: 0.5rem;
   }
 }
 
@@ -36,8 +62,13 @@
 }
 
 @layer utilities {
+  /*
+   * Soft glassmorphism, tuned separately per theme -- a light background
+   * needs a dark-tinted, more opaque glass to read as "frosted" at all,
+   * while the dark theme's original near-white tint stays as-is.
+   */
   .glass {
-    @apply bg-white/[0.03] backdrop-blur-xl border border-white/[0.08];
+    @apply border border-black/[0.06] bg-black/[0.03] backdrop-blur-xl dark:border-white/[0.08] dark:bg-white/[0.03];
   }
   .scrollbar-thin {
     scrollbar-width: thin;
@@ -58,6 +89,32 @@
   }
   .glow-pill:hover {
     box-shadow: 0 0 14px -2px hsl(var(--primary) / 0.6);
+  }
+  /*
+   * Animated gradient headline text for the hero. Falls back to a static
+   * gradient (no @keyframes) under prefers-reduced-motion -- still reads as
+   * a deliberate gradient heading, just without the slow drift.
+   */
+  .gradient-text {
+    background: linear-gradient(90deg, hsl(var(--primary)), #a855f7 45%, hsl(var(--primary)));
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .gradient-text {
+      animation: gradient-flow 6s ease infinite;
+    }
+  }
+}
+
+@keyframes gradient-flow {
+  0% {
+    background-position: 0% center;
+  }
+  100% {
+    background-position: 200% center;
   }
 }
 

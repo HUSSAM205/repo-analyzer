@@ -11,10 +11,14 @@ jest.mock("next/headers", () => ({
   }),
 }));
 
+// useRouter is mocked too now that ReposPage renders Hero -> SubmitRepoForm,
+// same reasoning as app-header.test.tsx: SubmitRepoForm calls useRouter() at
+// render time regardless of whether anything is actually submitted.
 jest.mock("next/navigation", () => ({
   redirect: jest.fn((url: string) => {
     throw new Error(`NEXT_REDIRECT:${url}`);
   }),
+  useRouter: () => ({ push: jest.fn(), refresh: jest.fn() }),
 }));
 
 import ReposPage from "./page";

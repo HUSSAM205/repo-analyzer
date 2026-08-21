@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { motion } from "framer-motion";
+import { TiltCard } from "@/components/tilt-card";
 import type { Repo } from "@/lib/types";
 
 const STATUS_STYLES: Record<Repo["status"], string> = {
@@ -28,15 +29,17 @@ export function RepoList({ repos }: { repos: Repo[] }) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.15, delay: index * 0.03 }}
         >
-          <Link
-            href={`/repos/${repo.id}`}
-            className="flex items-center justify-between rounded-lg border border-border bg-card px-4 py-3 transition-colors hover:border-primary/40 hover:elevated-ring"
-          >
-            <span className="font-mono text-sm">{repo.name}</span>
-            <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_STYLES[repo.status]}`}>
-              {repo.status}
-            </span>
-          </Link>
+          <TiltCard className="rounded-lg">
+            <Link
+              href={`/repos/${repo.id}`}
+              className="flex items-center justify-between rounded-lg border border-border bg-card px-4 py-3 transition-colors hover:border-primary/40 hover:elevated-ring"
+            >
+              <span className="font-mono text-sm">{repo.name}</span>
+              <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_STYLES[repo.status]}`}>
+                {repo.status}
+              </span>
+            </Link>
+          </TiltCard>
         </motion.li>
       ))}
     </ul>

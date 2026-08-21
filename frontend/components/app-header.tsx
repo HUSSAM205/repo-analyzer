@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Github } from "lucide-react";
 import { SubmitRepoForm } from "@/components/submit-repo-form";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 
 const HEALTH_POLL_INTERVAL_MS = 15000;
@@ -34,8 +35,8 @@ export function AppHeader() {
   const githubUrl = process.env.NEXT_PUBLIC_GITHUB_REPO_URL;
 
   return (
-    <header className="sticky top-0 z-50 flex h-16 shrink-0 items-center justify-between gap-4 border-b border-zinc-800/80 bg-zinc-950/80 px-4 backdrop-blur-md">
-      <span className="font-mono text-sm font-semibold tracking-tight text-zinc-100">Repo Analyzer</span>
+    <header className="sticky top-0 z-50 flex h-16 shrink-0 items-center justify-between gap-4 border-b border-border bg-background/80 px-4 backdrop-blur-md">
+      <span className="font-mono text-sm font-semibold tracking-tight text-foreground">Repo Analyzer</span>
       <div className="max-w-lg flex-1">
         <SubmitRepoForm compact />
       </div>
@@ -56,12 +57,13 @@ export function AppHeader() {
             target="_blank"
             rel="noreferrer"
             className={cn(
-              "flex items-center gap-1.5 rounded-md border border-zinc-800/60 px-2.5 py-1.5 text-xs text-zinc-400 transition-colors hover:border-zinc-700/50 hover:text-zinc-100"
+              "flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
             )}
           >
             <Github className="h-3.5 w-3.5" /> Star
           </a>
         )}
+        <ThemeToggle />
       </div>
     </header>
   );

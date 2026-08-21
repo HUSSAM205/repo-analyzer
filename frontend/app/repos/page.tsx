@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { AlertTriangle } from "lucide-react";
 import { backendUrl } from "@/lib/backend";
 import { getSessionToken } from "@/lib/session";
+import { Hero } from "@/components/hero";
 import { RepoList } from "@/components/repo-list";
 import type { Repo } from "@/lib/types";
 
@@ -57,8 +58,9 @@ export default async function ReposPage() {
   const result = await fetchRepos();
 
   return (
-    <main className="mx-auto max-w-2xl px-6 py-16">
-      <h1 className="mb-6 text-2xl font-semibold">Your repositories</h1>
+    <main className="mx-auto max-w-5xl px-6 py-10 sm:py-16">
+      <Hero />
+      <h2 className="mb-6 text-xl font-semibold text-foreground">Your repositories</h2>
       {result.ok ? (
         <RepoList repos={result.repos} />
       ) : (

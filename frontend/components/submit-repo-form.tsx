@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { forwardRef, useImperativeHandle, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
@@ -9,14 +9,21 @@ import { apiFetch } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import type { AnalyzeRepoResponse } from "@/lib/types";
 
-export function SubmitRepoForm({ compact = false }: { compact?: boolean } = {}) {
+export interface SubmitRepoFormHandle {
+  /** Fills the field with `url` and submits it, as if the user had typed and clicked Analyze. */
+  submitUrl: (url: string) => Promise<void>;
+}
+
+export const SubmitRepoForm = forwardRef<SubmitRepoFormHandle, { compact?: boolean }>(function SubmitRepoForm(
+  { compact = false },
+  ref
+) {
   const router = useRouter();
   const [url, setUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function submit(targetUrl: string) {
     // Defense in depth alongside the Button's `disabled` attribute (and now
     // the Input's) -- neither is a hard guarantee against a re-entrant
     // submit (e.g. a fast double Enter-key press before React re-renders
@@ -28,7 +35,7 @@ export function SubmitRepoForm({ compact = false }: { compact?: boolean } = {}) 
       const res = await apiFetch("/api/repos", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo_url: url }),
+        body: JSON.stringify({ repo_url: targetUrl }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({ detail: "Could not submit repo" }));
@@ -49,6 +56,18 @@ export function SubmitRepoForm({ compact = false }: { compact?: boolean } = {}) 
       setError("Could not reach the server. Please try again.");
       setSubmitting(false);
     }
+  }
+
+  useImperativeHandle(ref, () => ({
+    submitUrl: async (targetUrl: string) => {
+      setUrl(targetUrl);
+      await submit(targetUrl);
+    },
+  }));
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    await submit(url);
   }
 
   return (
@@ -74,4 +93,4 @@ export function SubmitRepoForm({ compact = false }: { compact?: boolean } = {}) 
       {error && <p className="text-sm text-destructive">{error}</p>}
     </motion.form>
   );
-}
+});

@@ -27,4 +27,21 @@ if (typeof window !== "undefined") {
       unobserve() {}
       disconnect() {}
     };
+
+  // jsdom has no matchMedia. next-themes' ThemeProvider reads it (system
+  // theme detection), and hero-canvas.tsx / tilt-card.tsx check
+  // prefers-reduced-motion with it -- any test that renders those needs a
+  // stub or hits "window.matchMedia is not a function".
+  window.matchMedia =
+    window.matchMedia ??
+    ((query) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: jest.fn(),
+      removeListener: jest.fn(),
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn(),
+      dispatchEvent: jest.fn(),
+    }));
 }
