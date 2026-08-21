@@ -10,9 +10,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_conversation_or_404
+from app.config import get_settings
 from app.core.agent import run_agent
 from app.core.rate_limit import enforce_chat_rate_limit
-from app.core.agent_tools import ALL_TOOL_SPECS, list_directory, read_file, search_code
+from app.core.agent_tools import (
+    LIST_DIRECTORY_TOOL_SPEC,
+    READ_FILE_TOOL_SPEC,
+    SEARCH_CODE_TOOL_SPEC,
+    list_directory,
+    read_file,
+    search_code,
+)
 from app.core.llm import Message as AgentMessage
 from app.core.llm_providers import get_llm_client
 from app.db.models import Message, MessageRole, User
@@ -20,6 +28,7 @@ from app.db.session import async_session_maker, get_db
 from app.schemas.chat import SendMessageRequest
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
@@ -102,11 +111,24 @@ async def send_message(
             async with async_session_maker() as search_db:
                 return await read_file(search_db, repo_id, args.get("path", ""))
 
-        tool_functions = {
-            "search_code": search_fn,
-            "list_directory": list_directory_fn,
-            "read_file": read_file_fn,
-        }
+        # search_code is excluded entirely (not just left to return empty
+        # results) when embedding is disabled -- see Settings.
+        # enable_embedding. Nothing populates the vector index in that
+        # case, so offering the tool at all would just waste a turn on a
+        # call that can never find anything.
+        if settings.enable_embedding:
+            tool_specs = [SEARCH_CODE_TOOL_SPEC, LIST_DIRECTORY_TOOL_SPEC, READ_FILE_TOOL_SPEC]
+            tool_functions = {
+                "search_code": search_fn,
+                "list_directory": list_directory_fn,
+                "read_file": read_file_fn,
+            }
+        else:
+            tool_specs = [LIST_DIRECTORY_TOOL_SPEC, READ_FILE_TOOL_SPEC]
+            tool_functions = {
+                "list_directory": list_directory_fn,
+                "read_file": read_file_fn,
+            }
 
         assistant_text = ""
         # Once message_done has been handled, ignore any further events
@@ -126,7 +148,7 @@ async def send_message(
         # process/loop teardown. Draining fully avoids that entirely.
         done_emitted = False
         try:
-            async for event in run_agent(llm_client, ALL_TOOL_SPECS, tool_functions, conversation_messages):
+            async for event in run_agent(llm_client, tool_specs, tool_functions, conversation_messages):
                 if done_emitted:
                     continue
                 if event.type == "token":

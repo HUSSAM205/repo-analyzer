@@ -62,8 +62,6 @@ READ_FILE_TOOL_SPEC = ToolSpec(
     },
 )
 
-ALL_TOOL_SPECS = [SEARCH_CODE_TOOL_SPEC, LIST_DIRECTORY_TOOL_SPEC, READ_FILE_TOOL_SPEC]
-
 
 async def search_code(db: AsyncSession, repo_id: UUID, query: str, limit: int = 5) -> str:
     query_embedding = await run_in_threadpool(embed_text, query)

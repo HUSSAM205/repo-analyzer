@@ -71,6 +71,18 @@ class Settings(BaseSettings):
     # correct for docker-compose and any deployment with a real worker
     # plan, where the CPU/memory isolation is worth having.
     run_worker_in_process: bool = False
+    # Confirmed live: loading the real ~500MB CodeBERT model during the
+    # embedding step (not just importing torch/transformers, which the two
+    # settings above already handle) is what actually exceeds a free-tier
+    # 512MB instance's memory -- the job got silently killed mid-embedding
+    # even with both settings above enabled. False skips the embedding
+    # step entirely (analyze_repo goes straight from committing files to
+    # COMPLETED) and excludes the now-useless search_code tool from chat
+    # (see app/api/routes/chat.py) -- list_directory/read_file still give
+    # the chat agent full access to every file, just without vector
+    # similarity search. True (the default) is correct everywhere memory
+    # isn't this tight.
+    enable_embedding: bool = True
 
     max_repo_size_mb: int = 500
     max_files_per_repo: int = 5000

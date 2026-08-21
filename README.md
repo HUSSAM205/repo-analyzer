@@ -216,8 +216,15 @@ worth a read before you commit to this path for something beyond a demo.
   returns `{"status": "ok"}` — this is also the path Render's own uptime
   monitor polls (`healthCheckPath` in `render.yaml`).
 - Startup note: the free plan spins down after 15min idle (~1min cold
-  start on the next request), and the first request after any cold start
-  also pays CodeBERT's model-load time — see "Known limitations" below.
+  start on the next request).
+- Feature note: `render.yaml` sets `ENABLE_EMBEDDING=false` on this
+  deployment — confirmed live that loading the real ~500MB CodeBERT model
+  during analysis's embedding step exceeds the free plan's 512MB even with
+  `RUN_WORKER_IN_PROCESS`/`WARM_EMBEDDING_MODEL_ON_STARTUP` both already
+  minimizing memory. Everything else works fully (repo analysis completes,
+  chat answers using `list_directory`/`read_file`) — only vector similarity
+  search (`search_code`) is unavailable on this specific deployment. Flip
+  it back to `true` on a plan with enough RAM.
 
 **3. Frontend on Vercel**
 - Vercel dashboard: New Project -> import this GitHub repo -> set the root

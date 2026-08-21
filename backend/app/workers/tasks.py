@@ -94,29 +94,41 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
                 job.skipped_files = walk_result.files_skipped
                 await db.commit()
 
-                job.stage = "embedding"
-                await db.commit()
+                # Confirmed live: loading the real ~500MB CodeBERT model
+                # here is what actually exceeds a free-tier 512MB
+                # instance's memory (embedding_cpu_threads/
+                # WARM_EMBEDDING_MODEL_ON_STARTUP alone weren't enough --
+                # the job was silently killed mid-embedding). Settings.
+                # enable_embedding=false skips this step entirely rather
+                # than attempt it and crash; search_code is excluded from
+                # chat's tools in that case too (see
+                # app/api/routes/chat.py) since the index would just stay
+                # empty. Everything else (files, domain briefing,
+                # list_directory/read_file in chat) is unaffected.
+                if settings.enable_embedding:
+                    job.stage = "embedding"
+                    await db.commit()
 
-                chunks_to_embed = select_chunks_for_embedding(
-                    walk_result.chunks, settings.embedding_max_files, settings.embedding_max_chunks
-                )
-                embedded = await asyncio.to_thread(embed_chunks, chunks_to_embed)
-                job.progress = 90
-                await db.commit()
-
-                for item in embedded:
-                    db.add(
-                        CodeChunk(
-                            repo_id=repo.id,
-                            file_path=item.chunk.file_path,
-                            symbol_name=item.chunk.symbol_name,
-                            node_type=NodeType(item.chunk.node_type),
-                            start_line=item.chunk.start_line,
-                            end_line=item.chunk.end_line,
-                            content=item.chunk.content,
-                            embedding=item.embedding,
-                        )
+                    chunks_to_embed = select_chunks_for_embedding(
+                        walk_result.chunks, settings.embedding_max_files, settings.embedding_max_chunks
                     )
+                    embedded = await asyncio.to_thread(embed_chunks, chunks_to_embed)
+                    job.progress = 90
+                    await db.commit()
+
+                    for item in embedded:
+                        db.add(
+                            CodeChunk(
+                                repo_id=repo.id,
+                                file_path=item.chunk.file_path,
+                                symbol_name=item.chunk.symbol_name,
+                                node_type=NodeType(item.chunk.node_type),
+                                start_line=item.chunk.start_line,
+                                end_line=item.chunk.end_line,
+                                content=item.chunk.content,
+                                embedding=item.embedding,
+                            )
+                        )
 
                 job.status = JobStatus.COMPLETED
                 job.stage = "completed"

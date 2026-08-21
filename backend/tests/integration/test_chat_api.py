@@ -415,6 +415,88 @@ async def test_send_message_accessible_by_other_users_conversation(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_message_excludes_search_code_tool_when_embedding_disabled(monkeypatch):
+    # Confirmed live: loading the real CodeBERT model during analysis's
+    # embedding step is what exceeds a free-tier 512MB instance's memory
+    # (see app/workers/tasks.py). Settings.enable_embedding=false means
+    # nothing ever populates the vector index, so search_code must not be
+    # offered to the agent at all -- list_directory/read_file remain
+    # available and still give it full access to every file.
+    from app.api.routes import chat as chat_module
+    from app.core.llm import LLMEvent
+    from app.core.llm import Message as AgentMessage
+
+    captured_tool_names: list[str] = []
+
+    async def fake_run_agent(llm_client, tools, tool_functions, messages):
+        captured_tool_names.extend(t.name for t in tools)
+        assert set(tool_functions.keys()) == set(captured_tool_names)
+        yield LLMEvent(type="message_done", message=AgentMessage(role="assistant", content="ok"))
+
+    monkeypatch.setattr(chat_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(chat_module, "get_llm_client", lambda: object())
+    monkeypatch.setattr(chat_module.settings, "enable_embedding", False)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token, user_id = await _register_and_login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        repo_id = await _create_repo(user_id)
+
+        conv_resp = await client.post(f"/api/v1/repos/{repo_id}/conversations", json={"title": "Chat"}, headers=headers)
+        conversation_id = conv_resp.json()["id"]
+
+        async with client.stream(
+            "POST",
+            f"/api/v1/conversations/{conversation_id}/messages",
+            json={"content": "hi"},
+            headers=headers,
+        ) as response:
+            assert response.status_code == 200
+            async for _ in response.aiter_text():
+                pass
+
+        assert "search_code" not in captured_tool_names
+        assert set(captured_tool_names) == {"list_directory", "read_file"}
+
+
+@pytest.mark.asyncio
+async def test_send_message_includes_search_code_tool_when_embedding_enabled(monkeypatch):
+    from app.api.routes import chat as chat_module
+    from app.core.llm import LLMEvent
+    from app.core.llm import Message as AgentMessage
+
+    captured_tool_names: list[str] = []
+
+    async def fake_run_agent(llm_client, tools, tool_functions, messages):
+        captured_tool_names.extend(t.name for t in tools)
+        yield LLMEvent(type="message_done", message=AgentMessage(role="assistant", content="ok"))
+
+    monkeypatch.setattr(chat_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(chat_module, "get_llm_client", lambda: object())
+    monkeypatch.setattr(chat_module.settings, "enable_embedding", True)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token, user_id = await _register_and_login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        repo_id = await _create_repo(user_id)
+
+        conv_resp = await client.post(f"/api/v1/repos/{repo_id}/conversations", json={"title": "Chat"}, headers=headers)
+        conversation_id = conv_resp.json()["id"]
+
+        async with client.stream(
+            "POST",
+            f"/api/v1/conversations/{conversation_id}/messages",
+            json={"content": "hi"},
+            headers=headers,
+        ) as response:
+            assert response.status_code == 200
+            async for _ in response.aiter_text():
+                pass
+
+        assert set(captured_tool_names) == {"search_code", "list_directory", "read_file"}
+
+
+@pytest.mark.asyncio
 async def test_send_message_rate_limited_after_capacity(monkeypatch):
     from app.core.llm import FakeLLMClient, ScriptedTurn
 

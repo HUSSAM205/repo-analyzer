@@ -22,13 +22,17 @@
 # fill in yourself when applying this blueprint -- nothing sensitive lives
 # in this file.
 #
-# Tradeoff worth knowing: running the worker in the same process as the
-# API (rather than the isolated two-container setup docker-compose.yml
-# uses locally) means a heavy embedding job shares the same event loop and
-# CPU as request handling, and can slow HTTP responses while it runs. The
-# free web plan also spins down after 15min idle (~1min cold start on the
-# next request). Both are the real cost of this being free, not something
-# either script hides.
+# Tradeoffs worth knowing, both confirmed live against a real free
+# instance, neither hidden by the scripts that work around them:
+# - Repo analysis's embedding step (search_code's vector index) is
+#   disabled outright here (ENABLE_EMBEDDING=false) -- loading the real
+#   ~500MB CodeBERT model exceeds 512MB even with every other memory
+#   optimization in place. Analysis still completes fully (files, domain
+#   briefing), and chat still works well via list_directory/read_file --
+#   just without similarity search. Flip this back to true (and drop
+#   RUN_WORKER_IN_PROCESS) on a plan with enough RAM to load the model.
+# - The free web plan spins down after 15min idle (~1min cold start on
+#   the next request).
 
 services:
   - type: web
@@ -129,3 +133,12 @@ services:
       # one copy of each library is ever imported.
       - key: RUN_WORKER_IN_PROCESS
         value: "true"
+      # Confirmed live: even with both settings above, an analyze job was
+      # silently killed mid-embedding -- loading the real ~500MB CodeBERT
+      # model itself (not just importing torch/transformers) is what
+      # actually exceeds 512MB. false skips the embedding step entirely
+      # (analysis still completes -- files, briefing, chat's
+      # list_directory/read_file tools all work) and excludes chat's now-
+      # useless search_code tool -- see Settings.enable_embedding.
+      - key: ENABLE_EMBEDDING
+        value: "false"

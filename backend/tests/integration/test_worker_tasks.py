@@ -346,6 +346,98 @@ async def test_analyze_repo_task_progresses_through_all_four_stages_in_order(mon
 
 
 @pytest.mark.asyncio
+async def test_analyze_repo_task_skips_embedding_entirely_when_disabled(monkeypatch):
+    # Confirmed live: loading the real ~500MB CodeBERT model during this
+    # step is what exceeds a free-tier 512MB Render instance's memory --
+    # the job was silently killed mid-embedding even with the other
+    # memory-saving settings enabled. Settings.enable_embedding=false must
+    # skip the step entirely (never call embed_chunks at all, not just
+    # skip storing its results) and still reach COMPLETED cleanly.
+    from app.core.chunker import Chunk
+    from app.core.ingestion import WalkedFile, WalkResult
+    from app.core.llm import FakeLLMClient, ScriptedTurn
+    from app.db.models import File
+    from app.workers import tasks as tasks_module
+
+    async with async_session_maker() as db:
+        user = User(email=f"worker-{uuid.uuid4()}@example.com", hashed_password="hashed")
+        db.add(user)
+        await db.flush()
+
+        repo = Repo(
+            user_id=user.id, url=f"https://example.com/fake/no-embed-repo-{uuid.uuid4()}",
+            name="fake-repo", status=RepoStatus.PENDING,
+        )
+        db.add(repo)
+        await db.flush()
+
+        job = Job(repo_id=repo.id, status=JobStatus.PENDING)
+        db.add(job)
+        await db.commit()
+        job_id = str(job.id)
+        repo_id = repo.id
+        user_id = user.id
+
+    def fake_clone_repo(url, dest_dir, max_size_mb, timeout_seconds):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        return dest_dir
+
+    fake_walk_result = WalkResult(
+        chunks=[Chunk(file_path="main.py", symbol_name="greet", node_type="function", start_line=1, end_line=2, content="def greet(): pass")],
+        files=[WalkedFile(path="main.py", content="def greet(): pass")],
+        files_processed=1, files_skipped=0,
+    )
+
+    def fake_walk_and_chunk(root_dir, max_files):
+        return fake_walk_result
+
+    embed_chunks_called = {"value": False}
+
+    def fake_embed_chunks(chunks, batch_size=8):
+        embed_chunks_called["value"] = True
+        raise AssertionError("embed_chunks must not be called when enable_embedding is False")
+
+    briefing_json = (
+        '{"primary_field": "Test", "target_audience": "Testers", '
+        '"architecture_overview": "Test overview.", "tech_stack_badges": []}'
+    )
+
+    monkeypatch.setattr(tasks_module, "clone_repo", fake_clone_repo)
+    monkeypatch.setattr(tasks_module, "walk_and_chunk", fake_walk_and_chunk)
+    monkeypatch.setattr(tasks_module, "embed_chunks", fake_embed_chunks)
+    monkeypatch.setattr(
+        tasks_module, "get_llm_client", lambda: FakeLLMClient(turns=[ScriptedTurn(text=briefing_json)])
+    )
+    monkeypatch.setattr(tasks_module.settings, "enable_embedding", False)
+
+    await analyze_repo({}, job_id)
+
+    assert embed_chunks_called["value"] is False
+
+    async with async_session_maker() as db:
+        refreshed_job = await db.get(Job, uuid.UUID(job_id))
+        assert refreshed_job.status == JobStatus.COMPLETED
+        assert refreshed_job.progress == 100
+        assert refreshed_job.stage == "completed"
+
+        chunk_result = await db.execute(select(CodeChunk).where(CodeChunk.repo_id == repo_id))
+        assert chunk_result.scalars().all() == []
+
+        file_result = await db.execute(select(File).where(File.repo_id == repo_id))
+        files = file_result.scalars().all()
+        assert [f.path for f in files] == ["main.py"]
+
+        for f in files:
+            await db.delete(f)
+        await db.delete(refreshed_job)
+        refreshed_repo = await db.get(Repo, repo_id)
+        await db.delete(refreshed_repo)
+        refreshed_user = await db.get(User, user_id)
+        await db.delete(refreshed_user)
+        await db.commit()
+
+
+@pytest.mark.asyncio
 async def test_analyze_repo_task_commits_files_and_briefing_before_embedding_starts(monkeypatch):
     # The core claim behind "instant ingestion": the file tree, code viewer,
     # and domain briefing card must not have to wait for embedding (the slow
