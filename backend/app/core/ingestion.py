@@ -180,6 +180,41 @@ def embed_chunks(chunks: list[Chunk], batch_size: int = 8) -> list[ChunkWithEmbe
     return [ChunkWithEmbedding(chunk=c, embedding=e) for c, e in zip(chunks, embeddings)]
 
 
+# Prose/docs never carry the kind of code semantics search_code's embedding
+# search is for -- excluded from embedding entirely (they're still fully
+# stored as File rows regardless, so list_directory/read_file work on them
+# same as any other file; this only affects the embedding step's scope).
+NON_EMBEDDABLE_EXTENSIONS = {".md", ".markdown", ".rst", ".txt", ".adoc", ".mdx"}
+
+
+def select_chunks_for_embedding(chunks: list[Chunk], max_files: int) -> list[Chunk]:
+    # Bulk CodeBERT embedding is the dominant cost in analysis -- confirmed
+    # live this session, minutes of sustained near-100%-CPU for a real
+    # medium-sized repo. Capping which *files* get embedded (not truncating
+    # chunks within a file) bounds that cost to a small, predictable number
+    # regardless of repo size, while list_directory/read_file (added
+    # separately) give the chat agent a way to inspect any file directly
+    # even if it was never embedded -- search_code just won't surface it by
+    # keyword/semantic search.
+    eligible_by_file: dict[str, list[Chunk]] = {}
+    for chunk in chunks:
+        ext = Path(chunk.file_path).suffix.lower()
+        if ext in NON_EMBEDDABLE_EXTENSIONS:
+            continue
+        eligible_by_file.setdefault(chunk.file_path, []).append(chunk)
+
+    # Rank files by total chunked content length, descending -- a cheap
+    # proxy for "substantive": a file with more/larger parsed symbols is
+    # more likely to be load-bearing than e.g. a tiny stub or a generated
+    # constants file. Ties (e.g. all-empty) keep dict insertion order, which
+    # is file-discovery order from the walk -- stable, not random.
+    ranked_paths = sorted(
+        eligible_by_file, key=lambda p: sum(len(c.content) for c in eligible_by_file[p]), reverse=True
+    )[:max_files]
+    ranked_set = set(ranked_paths)
+    return [c for c in chunks if c.file_path in ranked_set]
+
+
 def ingest_local_directory(root_dir: Path, max_files: int) -> IngestionResult:
     walk_result = walk_and_chunk(root_dir, max_files)
     embedded = embed_chunks(walk_result.chunks)

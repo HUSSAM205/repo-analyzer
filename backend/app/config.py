@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     max_repo_size_mb: int = 500
     max_files_per_repo: int = 5000
     clone_timeout_seconds: int = 300
+    # Bounds the CodeBERT embedding step to the top N most substantive
+    # source files (see ingestion.select_chunks_for_embedding) so analysis
+    # finishes in seconds instead of minutes regardless of repo size --
+    # list_directory/read_file (app/core/agent_tools.py) give the chat agent
+    # full access to every file's raw content either way, embedding-capped
+    # or not, so this only narrows search_code's index, not what the agent
+    # can see.
+    embedding_max_files: int = 15
 
     rate_limit_analyze_per_minute: int = 5
     rate_limit_bucket_capacity: int = 5

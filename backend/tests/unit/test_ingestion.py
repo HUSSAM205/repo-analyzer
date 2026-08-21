@@ -3,9 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from app.core.ingestion import _is_likely_binary, ingest_local_directory, walk_and_chunk
+from app.core.chunker import Chunk
+from app.core.ingestion import _is_likely_binary, ingest_local_directory, select_chunks_for_embedding, walk_and_chunk
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "sample_repo"
+
+
+def _chunk(file_path: str, content: str = "x") -> Chunk:
+    return Chunk(file_path=file_path, symbol_name=None, node_type="function", start_line=1, end_line=1, content=content)
 
 
 def test_walk_and_chunk_processes_all_fixture_files():
@@ -151,3 +156,53 @@ def test_ingest_local_directory_produces_embeddings():
     assert len(result.chunks) > 0
     assert all(len(cwe.embedding) == 768 for cwe in result.chunks)
     assert len(result.files) == 3
+
+
+def test_select_chunks_for_embedding_excludes_markdown_and_docs():
+    chunks = [
+        _chunk("main.py", "real code"),
+        _chunk("README.md", "prose, not code"),
+        _chunk("docs/guide.rst", "more prose"),
+        _chunk("notes.txt", "plain text"),
+    ]
+
+    selected = select_chunks_for_embedding(chunks, max_files=15)
+
+    selected_paths = {c.file_path for c in selected}
+    assert selected_paths == {"main.py"}
+
+
+def test_select_chunks_for_embedding_caps_to_the_most_substantive_files():
+    # 20 candidate files, each with one chunk whose size encodes its rank
+    # (file 0 has the most content, file 19 the least) -- only the top 15 by
+    # total chunked content should survive the cap.
+    chunks = [_chunk(f"file_{i}.py", content="x" * (200 - i)) for i in range(20)]
+
+    selected = select_chunks_for_embedding(chunks, max_files=15)
+
+    selected_paths = {c.file_path for c in selected}
+    assert len(selected_paths) == 15
+    assert selected_paths == {f"file_{i}.py" for i in range(15)}
+    assert "file_15.py" not in selected_paths
+    assert "file_19.py" not in selected_paths
+
+
+def test_select_chunks_for_embedding_keeps_all_chunks_of_a_selected_file():
+    # A file contributing multiple chunks must have every one of them
+    # survive the cap together -- the cap operates on files, not on
+    # individual chunks within a kept file.
+    chunks = [
+        _chunk("big.py", "x" * 500),
+        _chunk("big.py", "y" * 500),
+        _chunk("big.py", "z" * 500),
+        _chunk("small.py", "w"),
+    ]
+
+    selected = select_chunks_for_embedding(chunks, max_files=1)
+
+    assert len(selected) == 3
+    assert all(c.file_path == "big.py" for c in selected)
+
+
+def test_select_chunks_for_embedding_handles_empty_input():
+    assert select_chunks_for_embedding([], max_files=15) == []

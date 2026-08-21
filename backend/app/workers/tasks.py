@@ -8,7 +8,14 @@ from sqlalchemy import delete
 
 from app.config import get_settings
 from app.core.domain_briefing import generate_domain_briefing
-from app.core.ingestion import CloneError, RepoTooLargeError, clone_repo, embed_chunks, walk_and_chunk
+from app.core.ingestion import (
+    CloneError,
+    RepoTooLargeError,
+    clone_repo,
+    embed_chunks,
+    select_chunks_for_embedding,
+    walk_and_chunk,
+)
 from app.core.llm_providers import get_llm_client
 from app.db.models import CodeChunk, File, Job, JobStatus, NodeType, Repo, RepoStatus
 from app.db.session import async_session_maker
@@ -52,8 +59,6 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
                 walk_result = await asyncio.to_thread(
                     walk_and_chunk, clone_path, max_files=settings.max_files_per_repo
                 )
-                job.progress = 50
-                await db.commit()
 
                 # Still within the "parsing" stage as far as the user is
                 # concerned -- the AST/chunking walk and the domain briefing
@@ -64,23 +69,38 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
                 llm_client = get_llm_client()
                 repo.domain_briefing = await generate_domain_briefing(walk_result, llm_client)
 
+                # Re-analyzing an existing repo reuses the same Repo row with a
+                # fresh Job (see POST /repos/analyze), so any files/chunks from
+                # a previous analysis must be cleared before inserting the new
+                # set, or every re-analysis doubles up. Deleting both here
+                # (rather than only immediately before each is re-inserted)
+                # keeps File and CodeChunk consistent with each other at every
+                # commit point below, not just the final one.
+                await db.execute(delete(CodeChunk).where(CodeChunk.repo_id == repo.id))
+                await db.execute(delete(File).where(File.repo_id == repo.id))
+
+                for walked_file in walk_result.files:
+                    db.add(File(repo_id=repo.id, path=walked_file.path, content=walked_file.content))
+
+                # Committed here -- before embedding starts, not after it
+                # finishes. The file tree, code viewer, and domain briefing
+                # card only ever needed File rows + repo.domain_briefing, never
+                # CodeChunk embeddings, so gating all three behind the slowest
+                # step (embedding) was an artificial dependency. Embeddings
+                # power only chat's search_code tool, which read_file/
+                # list_directory (app/core/agent_tools.py) already provide a
+                # fallback for regardless of embedding coverage.
+                job.progress = 60
+                job.skipped_files = walk_result.files_skipped
+                await db.commit()
+
                 job.stage = "embedding"
                 await db.commit()
 
-                embedded = await asyncio.to_thread(embed_chunks, walk_result.chunks)
+                chunks_to_embed = select_chunks_for_embedding(walk_result.chunks, settings.embedding_max_files)
+                embedded = await asyncio.to_thread(embed_chunks, chunks_to_embed)
                 job.progress = 90
                 await db.commit()
-
-                # Re-analyzing an existing repo reuses the same Repo row with a
-                # fresh Job (see POST /repos/analyze), so any chunks from a
-                # previous analysis must be cleared before inserting the new
-                # set, or every re-analysis doubles the chunk count. This runs
-                # in the same transaction as the inserts below and the job/repo
-                # status update that follows, so if anything downstream fails
-                # the whole transaction rolls back and the old chunks are
-                # restored rather than left half-deleted.
-                await db.execute(delete(CodeChunk).where(CodeChunk.repo_id == repo.id))
-                await db.execute(delete(File).where(File.repo_id == repo.id))
 
                 for item in embedded:
                     db.add(
@@ -96,10 +116,6 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
                         )
                     )
 
-                for walked_file in walk_result.files:
-                    db.add(File(repo_id=repo.id, path=walked_file.path, content=walked_file.content))
-
-                job.skipped_files = walk_result.files_skipped
                 job.status = JobStatus.COMPLETED
                 job.stage = "completed"
                 job.progress = 100

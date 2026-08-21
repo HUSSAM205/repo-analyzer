@@ -346,6 +346,121 @@ async def test_analyze_repo_task_progresses_through_all_four_stages_in_order(mon
 
 
 @pytest.mark.asyncio
+async def test_analyze_repo_task_commits_files_and_briefing_before_embedding_starts(monkeypatch):
+    # The core claim behind "instant ingestion": the file tree, code viewer,
+    # and domain briefing card must not have to wait for embedding (the slow
+    # step) to finish. Proves it concretely rather than trusting the code's
+    # structure: a commit-hook (same technique as the stage-order test above)
+    # records whether a commit has landed with File rows staged while the
+    # job's stage is still "parsing" (i.e. the early files-commit, distinct
+    # from the later stage="embedding" commit, which adds no new File rows).
+    # embed_chunks -- called via asyncio.to_thread, so it must stay a plain
+    # sync function, not a coroutine -- then checks that flag was already
+    # set by the time it's invoked.
+    from app.core.chunker import Chunk
+    from app.core.ingestion import ChunkWithEmbedding, WalkedFile, WalkResult
+    from app.core.llm import FakeLLMClient, ScriptedTurn
+    from app.db.models import File
+    from app.workers import tasks as tasks_module
+
+    async with async_session_maker() as db:
+        user = User(email=f"worker-{uuid.uuid4()}@example.com", hashed_password="hashed")
+        db.add(user)
+        await db.flush()
+
+        repo = Repo(user_id=user.id, url=f"https://example.com/fake/early-commit-repo-{uuid.uuid4()}", name="fake-repo", status=RepoStatus.PENDING)
+        db.add(repo)
+        await db.flush()
+
+        job = Job(repo_id=repo.id, status=JobStatus.PENDING)
+        db.add(job)
+        await db.commit()
+        job_id = str(job.id)
+        repo_id = repo.id
+        user_id = user.id
+
+    def fake_clone_repo(url, dest_dir, max_size_mb, timeout_seconds):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        return dest_dir
+
+    fake_walk_result = WalkResult(
+        chunks=[Chunk(file_path="main.py", symbol_name="greet", node_type="function", start_line=1, end_line=2, content="def greet(): pass")],
+        files=[WalkedFile(path="main.py", content="def greet(): pass")],
+        files_processed=1, files_skipped=0,
+    )
+
+    def fake_walk_and_chunk(root_dir, max_files):
+        return fake_walk_result
+
+    files_committed_while_still_parsing = {"value": False}
+    embed_chunks_saw_files_already_committed = {"value": None}
+
+    original_commit = AsyncSession.commit
+
+    async def recording_commit(self, *args, **kwargs):
+        # A File added via db.add() has no primary key yet -- and therefore
+        # isn't in identity_map -- until commit()'s internal autoflush runs,
+        # which happens *after* this hook's check (it wraps the call to
+        # original_commit). session.new holds exactly these pending,
+        # not-yet-flushed inserts, so both collections need checking.
+        candidate_objects = list(self.sync_session.identity_map.values()) + list(self.sync_session.new)
+        has_this_repos_files = any(isinstance(obj, File) and obj.repo_id == repo_id for obj in candidate_objects)
+        job_obj = next(
+            (obj for obj in self.sync_session.identity_map.values() if isinstance(obj, Job) and str(obj.id) == job_id),
+            None,
+        )
+        if has_this_repos_files and job_obj is not None and job_obj.stage == "parsing":
+            files_committed_while_still_parsing["value"] = True
+        return await original_commit(self, *args, **kwargs)
+
+    def fake_embed_chunks(chunks, batch_size=8):
+        embed_chunks_saw_files_already_committed["value"] = files_committed_while_still_parsing["value"]
+        return [ChunkWithEmbedding(chunk=c, embedding=[0.0] * 768) for c in chunks]
+
+    briefing_json = (
+        '{"primary_field": "Test", "target_audience": "Testers", '
+        '"architecture_overview": "Test overview.", "tech_stack_badges": []}'
+    )
+
+    monkeypatch.setattr(tasks_module, "clone_repo", fake_clone_repo)
+    monkeypatch.setattr(tasks_module, "walk_and_chunk", fake_walk_and_chunk)
+    monkeypatch.setattr(tasks_module, "embed_chunks", fake_embed_chunks)
+    monkeypatch.setattr(
+        tasks_module, "get_llm_client", lambda: FakeLLMClient(turns=[ScriptedTurn(text=briefing_json)])
+    )
+    monkeypatch.setattr(AsyncSession, "commit", recording_commit)
+
+    try:
+        await analyze_repo({}, job_id)
+    finally:
+        monkeypatch.undo()
+
+    assert embed_chunks_saw_files_already_committed["value"] is True
+
+    async with async_session_maker() as db:
+        refreshed_job = await db.get(Job, uuid.UUID(job_id))
+        assert refreshed_job.status == JobStatus.COMPLETED
+
+        refreshed_repo = await db.get(Repo, repo_id)
+        assert refreshed_repo.domain_briefing["primary_field"] == "Test"
+
+        file_result = await db.execute(select(File).where(File.repo_id == repo_id))
+        files = file_result.scalars().all()
+        assert [f.path for f in files] == ["main.py"]
+
+        chunk_result = await db.execute(select(CodeChunk).where(CodeChunk.repo_id == repo_id))
+        for chunk in chunk_result.scalars().all():
+            await db.delete(chunk)
+        for f in files:
+            await db.delete(f)
+        await db.delete(refreshed_job)
+        await db.delete(refreshed_repo)
+        refreshed_user = await db.get(User, user_id)
+        await db.delete(refreshed_user)
+        await db.commit()
+
+
+@pytest.mark.asyncio
 async def test_analyze_repo_task_marks_failed_when_running_transition_fails(monkeypatch):
     # Mirrors test_analyze_enqueue_failure_marks_job_failed in
     # test_repos_api.py, one step earlier in the pipeline: the RUNNING
