@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -53,55 +53,45 @@ function useIsNarrowViewport(breakpointPx: number): boolean {
   return isNarrow;
 }
 
-// A pane's width starts at its fixed default on every render -- including
-// the server render and the very first client render before hydration --
-// and only swaps in a `localStorage`-remembered value afterward, via
-// effect. This deliberately does not read `localStorage` synchronously
-// during render: that would need its own `typeof window` guard just to
-// avoid crashing on the server, and would still risk a hydration mismatch
-// since the server has no `localStorage` to read from at all. First paint
-// always matches the default (so it never blocks initial render), and a
-// user's remembered width -- if any -- pops in a moment after mount. Same
-// "SSR-safe, client-hydrated" shape as `useJobPolling` and
-// `code-viewer.tsx` elsewhere in this codebase.
+// Reads `localStorage` synchronously in the `useState` initializer, not via
+// a post-mount effect. Two effect-based approaches were tried and both
+// failed live (real browser, not just jsdom -- neither race reproduces
+// there): a passive `useEffect` correction landed too late, and even
+// `useLayoutEffect` (synchronous-before-paint) still lost the race, because
+// `WorkspaceShell`'s consumer of this width -- a framer-motion
+// `motion.aside`, a *child* component -- runs its own internal mount
+// layout-effects before this hook's *parent-level* layout effect does
+// (React runs child effects before parent effects), so framer-motion had
+// already locked onto the pre-hydration default either way. The pane was
+// left visibly stuck at the default width forever after a reload, despite
+// `localStorage` holding the correct value.
+//
+// Reading synchronously sidesteps the whole race, and is safe here
+// specifically because `WorkspaceShell` is only ever rendered client-side,
+// after `app/repos/[repoId]/page.tsx`'s own async repo fetch resolves (it
+// shows a plain "Loading..." state, with no `WorkspaceShell` in the tree at
+// all, until then) -- so this initializer never runs during actual SSR or
+// hydration reconciliation, and there is no server-vs-client mismatch to
+// risk. (Contrast with `useJobPolling`/`code-viewer.tsx` elsewhere in this
+// codebase, which *do* need the effect-based pattern because they mount
+// during the initial hydration-sensitive render.)
 //
 // The returned setter writes to `localStorage` itself, inline with the
-// state update, instead of a second effect watching `width` and persisting
-// on every change. That second-effect shape looks natural but has a real
-// bug under React 18 Strict Mode's dev-only double-invocation of mount
-// effects: on the first mount, the hydration effect and a naive persist
-// effect both run twice back-to-back *before* the hydrated value has
-// committed as a new render, so the persist effect's first pass -- still
-// seeing the pre-hydration default in `width` -- writes that default over
-// whatever was actually stored, and the hydration effect's second pass
-// then reads back its own just-corrupted value. Writing only from the
-// setter (i.e. only in direct response to an actual drag) sidesteps this
-// entirely: nothing but a real width change ever touches storage.
+// state update, instead of a separate effect watching `width` and
+// persisting on every change -- so nothing but a real width change (i.e. an
+// actual drag) ever touches storage.
 function usePersistedWidth(
   storageKey: string,
   defaultWidth: number,
   min: number,
   max: number
 ): readonly [number, (updater: number | ((prev: number) => number)) => void] {
-  const [width, setWidthState] = useState(defaultWidth);
-
-  // useLayoutEffect, not useEffect: confirmed live (real browser, not just
-  // reasoning about it) that a passive effect here is too late -- framer-
-  // motion's `motion.aside` (the consumer of this width, in the component
-  // below) had already established its animated width at the pre-hydration
-  // default by the time a useEffect-driven correction landed, and never
-  // picked up the later change, leaving the pane visibly stuck at the
-  // default width forever despite `localStorage` holding the right value.
-  // Synchronous-before-paint via useLayoutEffect avoids that race.
-  useLayoutEffect(() => {
+  const [width, setWidthState] = useState(() => {
     const stored = window.localStorage.getItem(storageKey);
-    if (stored === null) return;
+    if (stored === null) return defaultWidth;
     const parsed = Number(stored);
-    if (!Number.isNaN(parsed)) setWidthState(clamp(parsed, min, max));
-    // Intentionally mount-only: this hydrates the one-time remembered
-    // value. It must not re-run later and clobber a live drag in progress.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    return Number.isNaN(parsed) ? defaultWidth : clamp(parsed, min, max);
+  });
 
   const setWidth = useCallback(
     (updater: number | ((prev: number) => number)) => {
