@@ -4,11 +4,12 @@ import { useEffect, useState } from "react";
 import { FileTreeNode } from "./file-tree-node";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api-client";
-import type { FileTreeEntry, FileTreeResponse } from "@/lib/types";
+import type { FileTreeEntry, FileTreeResponse, Job } from "@/lib/types";
 
 export function FileTree({
   repoId,
   polling,
+  stage,
   selectedPath,
   onSelectFile,
 }: {
@@ -21,14 +22,28 @@ export function FileTree({
   // here with `polling` true while analysis is still running in the
   // background worker -- fetching the file tree once on mount (the naive
   // approach) races the ingestion job and permanently shows "No files
-  // found", even after the job completes, because nothing re-triggers the
-  // fetch. `polling` flips from true to false the moment the job reaches a
-  // terminal state, so re-running the fetch when it changes picks up the
-  // real file list right when analysis actually finishes. When there's no
-  // job for this page load (browsing an already-analyzed repo), `polling`
-  // is false from the start and this behaves exactly like a single
-  // fetch-on-mount.
+  // found". `polling` flipping from true to false when the job reaches a
+  // terminal state re-triggers the fetch as a last-resort safety net, but
+  // `stage` below is what actually matters for freshness now -- see its
+  // comment. When there's no job for this page load (browsing an
+  // already-analyzed repo), `polling` is false from the start and (with no
+  // `stage` either) this behaves exactly like a single fetch-on-mount.
   polling: boolean;
+  // The analysis job's current stage ("cloning" | "parsing" | "embedding" |
+  // "completed" | null/undefined), threaded down from `page.tsx`'s
+  // `effectiveJob?.stage`. The backend now commits `File` rows in their own
+  // transaction right after parsing -- well before the job reaches a
+  // terminal `status` (see the pipeline change this frontend work is
+  // landing against) -- so waiting on `polling` alone (which only flips
+  // once at the very end of the job) misses that earlier moment entirely:
+  // a repo's files finish ingesting at the "parsing" -> "embedding"
+  // transition, but without this, the tree would stay stuck on "No files
+  // found" until the (now much slower, since it happens after) embedding
+  // step also completes. Including `stage` in the fetch effect's
+  // dependency list below re-runs the fetch on every stage transition, so
+  // the tree picks up the real file list as soon as it actually exists in
+  // the database, not just once the whole job finishes.
+  stage?: Job["stage"];
   selectedPath: string | null;
   onSelectFile: (path: string) => void;
 }) {
@@ -60,7 +75,7 @@ export function FileTree({
     return () => {
       cancelled = true;
     };
-  }, [repoId, polling]);
+  }, [repoId, polling, stage]);
 
   if (error) {
     return <p className="p-4 text-sm text-destructive">{error}</p>;

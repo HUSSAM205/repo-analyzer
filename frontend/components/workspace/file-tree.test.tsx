@@ -74,4 +74,61 @@ describe("FileTree", () => {
     expect(await screen.findByText("README")).toBeInTheDocument();
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
+
+  it("re-fetches on a 'parsing' -> 'embedding' stage transition, well before the job reaches a terminal status", async () => {
+    // The backend now commits `File` rows in their own transaction right
+    // after parsing -- before the (slower) embedding step runs -- so the
+    // file tree can be fully populated in the database while the job is
+    // still non-terminal (`polling` stays true throughout this whole test:
+    // the job never finishes). Before this fix, nothing re-triggered the
+    // fetch until `polling` itself flipped to false at the very end of the
+    // job, so this earlier "files already exist" moment was invisible to
+    // the UI. Passing `stage` through and including it in the effect's
+    // dependency list is what picks it up right when it actually happens.
+    let callCount = 0;
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      expect(url).toBe("/api/repos/repo-1/files");
+      callCount += 1;
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ entries: callCount === 1 ? [] : [readmeEntry] }),
+      } as Response);
+    }) as unknown as typeof fetch;
+
+    const { rerender } = render(
+      <FileTree repoId="repo-1" polling={true} stage="parsing" selectedPath={null} onSelectFile={jest.fn()} />
+    );
+
+    await waitFor(() => expect(screen.getByText("No files found for this repository.")).toBeInTheDocument());
+    expect(callCount).toBe(1);
+
+    // Stage transitions to "embedding" -- `polling` stays true (the job
+    // itself is nowhere near terminal), only `stage` changes.
+    rerender(<FileTree repoId="repo-1" polling={true} stage="embedding" selectedPath={null} onSelectFile={jest.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("README")).toBeInTheDocument());
+    expect(callCount).toBe(2);
+  });
+
+  it("does not re-fetch on a re-render where neither `polling` nor `stage` actually changed", async () => {
+    let callCount = 0;
+    global.fetch = jest.fn(() => {
+      callCount += 1;
+      return Promise.resolve({ ok: true, json: async () => ({ entries: [readmeEntry] }) } as Response);
+    }) as unknown as typeof fetch;
+
+    const { rerender } = render(
+      <FileTree repoId="repo-1" polling={true} stage="parsing" selectedPath={null} onSelectFile={jest.fn()} />
+    );
+
+    await waitFor(() => expect(screen.getByText("README")).toBeInTheDocument());
+    expect(callCount).toBe(1);
+
+    // Same repoId/polling/stage, only the selection callback identity
+    // changed -- a real re-render, but not one that should trigger a fetch.
+    rerender(<FileTree repoId="repo-1" polling={true} stage="parsing" selectedPath={null} onSelectFile={jest.fn()} />);
+
+    expect(callCount).toBe(1);
+  });
 });

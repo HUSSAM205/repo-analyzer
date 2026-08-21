@@ -51,7 +51,21 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
     return () => {
       cancelled = true;
     };
-  }, [params.repoId]);
+    // `job?.stage` is deliberately in this dependency list, not just
+    // `params.repoId`: the backend now commits `File` rows and
+    // `repo.domain_briefing` in their own transaction right after parsing,
+    // well before the job reaches a terminal status (see the pipeline
+    // change this frontend work is landing against) -- so `Job.stage`
+    // transitions from "parsing" to "embedding" while `repo` (fetched once
+    // here) is already stale. Re-running this fetch on every stage
+    // transition is what actually picks up the freshly-populated
+    // `domain_briefing` (and, transitively, keeps `repo.status` current)
+    // without waiting for the whole job to finish. `job` comes from
+    // `useJobPolling`, which is null whenever there's no `?job=` query
+    // param (e.g. a bookmark/reload) -- `job?.stage` is then permanently
+    // `undefined` and this effect behaves exactly like a fetch-once-on-mount,
+    // same as before.
+  }, [params.repoId, job?.stage]);
 
   if (error) {
     return <div className="p-8 text-sm text-destructive">{error}</div>;
@@ -73,6 +87,11 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
   const effectiveJob = job ?? repo.latest_job ?? null;
   const status = effectiveJob?.status ?? repo.status;
   const isAnalyzing = status === "pending" || status === "running";
+  // `repo.domain_briefing` can be populated well before the job reaches a
+  // terminal status (see the effect above) -- gating the briefing card on
+  // `!isAnalyzing` would sit on data that's already in hand and just not
+  // shown yet. Render it the moment it exists, regardless of `isAnalyzing`.
+  const hasBriefing = repo.domain_briefing != null;
 
   return (
     <>
@@ -86,6 +105,20 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2, ease: "easeInOut" }}
           >
+            {hasBriefing && (
+              <>
+                <RepoBriefing briefing={repo.domain_briefing} />
+                {/* Embeddings only power chat's search_code tool (which also
+                    has list_directory/read_file fallbacks regardless of
+                    embedding coverage) -- browsing files and reading this
+                    briefing never depended on them. This note just explains
+                    why chat might still return sparse search results at
+                    this exact moment. */}
+                <p className="border-b border-zinc-800/60 bg-zinc-950/40 px-4 py-1.5 text-[11px] text-zinc-500">
+                  AI chat search is still indexing -- search results may be sparse until analysis finishes.
+                </p>
+              </>
+            )}
             <AnalysisProgress stage={effectiveJob?.stage} />
           </motion.div>
         ) : status !== "failed" ? (
@@ -101,7 +134,15 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
         ) : null}
       </AnimatePresence>
       <WorkspaceShell
-        left={<FileTree repoId={params.repoId} polling={polling} selectedPath={selectedPath} onSelectFile={setSelectedPath} />}
+        left={
+          <FileTree
+            repoId={params.repoId}
+            polling={polling}
+            stage={effectiveJob?.stage}
+            selectedPath={selectedPath}
+            onSelectFile={setSelectedPath}
+          />
+        }
         center={<CodeViewer repoId={params.repoId} path={selectedPath} />}
         right={<ChatPanel repoId={params.repoId} onCitationClick={setSelectedPath} />}
       />
