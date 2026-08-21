@@ -1,10 +1,15 @@
 # Render Blueprint for the Repo Analyzer backend -- 100%-free-tier setup.
 #
 # A single free Render web service runs BOTH the FastAPI API and the ARQ
-# background worker (backend/scripts/start_unified.sh), because Render has
-# no free tier for standalone worker services at all. Postgres (with
-# pgvector) and Redis are NOT provisioned here either -- Render's own free
-# Postgres is deleted 30 days after creation, which defeats "permanent."
+# background worker -- in the same Python process (see Settings.
+# run_worker_in_process and app/main.py's lifespan), not just the same
+# container -- because Render has no free tier for standalone worker
+# services at all, and confirmed live that even two separate OS processes
+# in one container OOM'd a 512MB instance (each imports its own copy of
+# torch/transformers/langchain/langgraph regardless of whether it loads
+# any model weights). Postgres (with pgvector) and Redis are NOT
+# provisioned here either -- Render's own free Postgres is deleted 30 days
+# after creation, which defeats "permanent."
 # Use an external always-free provider instead:
 #   - Postgres: neon.tech or supabase.com (both have a real free tier with
 #     pgvector support, no expiration).
@@ -17,12 +22,13 @@
 # fill in yourself when applying this blueprint -- nothing sensitive lives
 # in this file.
 #
-# Tradeoff worth knowing: running the worker in the same container as the
+# Tradeoff worth knowing: running the worker in the same process as the
 # API (rather than the isolated two-container setup docker-compose.yml
-# uses locally) means a heavy embedding job can slow HTTP responses while
-# it runs -- see start_unified.sh's own comment. The free web plan also
-# spins down after 15min idle (~1min cold start on the next request). Both
-# are the real cost of this being free, not something either script hides.
+# uses locally) means a heavy embedding job shares the same event loop and
+# CPU as request handling, and can slow HTTP responses while it runs. The
+# free web plan also spins down after 15min idle (~1min cold start on the
+# next request). Both are the real cost of this being free, not something
+# either script hides.
 
 services:
   - type: web
@@ -115,3 +121,11 @@ services:
       # use instead -- see Settings.warm_embedding_model_on_startup.
       - key: WARM_EMBEDDING_MODEL_ON_STARTUP
         value: "false"
+      # Confirmed live: even with the above set, two separate OS processes
+      # (api + a standalone `arq` process) still OOM'd -- each imports its
+      # own copy of torch/transformers/langchain/langgraph regardless of
+      # model weights. true runs the worker loop inside this process's own
+      # event loop instead (see Settings.run_worker_in_process), so only
+      # one copy of each library is ever imported.
+      - key: RUN_WORKER_IN_PROCESS
+        value: "true"

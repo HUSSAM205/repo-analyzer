@@ -60,6 +60,17 @@ class Settings(BaseSettings):
     # the same lazily-cached _tokenizer()/_model()), it just pays the cold
     # -load cost on that first request instead of at startup.
     warm_embedding_model_on_startup: bool = True
+    # Runs the ARQ worker loop inside the api process's own event loop
+    # (see app/main.py's lifespan) instead of as a separate `arq` process.
+    # Exists for the same free-tier-container reason as the setting above,
+    # and supersedes it: confirmed live that even with eager warm-up
+    # disabled, two separate OS processes each importing their own copy of
+    # torch/transformers/langchain/langgraph was enough on its own to OOM a
+    # 512MB instance -- only one process, one import of each library,
+    # actually fit. False (two separate processes/services) remains
+    # correct for docker-compose and any deployment with a real worker
+    # plan, where the CPU/memory isolation is worth having.
+    run_worker_in_process: bool = False
 
     max_repo_size_mb: int = 500
     max_files_per_repo: int = 5000

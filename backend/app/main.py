@@ -1,12 +1,16 @@
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
+from arq.worker import create_worker
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import auth, chat, conversations, files, jobs, repos, search
 from app.config import get_settings
 from app.core.embeddings import _model, _tokenizer
+from app.workers.settings import WorkerSettings
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -45,7 +49,23 @@ async def lifespan(app: FastAPI):
             key_attr.upper(),
         )
 
+    # See Settings.run_worker_in_process for why this exists: on a
+    # memory-constrained single-container deployment, running the ARQ
+    # worker loop in this same process (sharing the one already-imported
+    # copy of every heavy dependency) rather than as a second OS process is
+    # the difference between fitting in 512MB and not.
+    # handle_signals=False -- uvicorn already owns SIGTERM/SIGINT handling
+    # for this process; a second handler here would fight it.
+    worker = create_worker(WorkerSettings, handle_signals=False) if settings.run_worker_in_process else None
+    worker_task = asyncio.create_task(worker.async_run()) if worker is not None else None
+
     yield
+
+    if worker is not None and worker_task is not None:
+        worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker_task
+        await worker.close()
 
 
 def parse_cors_origins(raw: str) -> tuple[list[str], bool]:

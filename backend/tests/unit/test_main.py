@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 import app.main as main_module
@@ -44,3 +46,54 @@ async def test_lifespan_skips_model_warmup_when_disabled(monkeypatch):
         pass
 
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_lifespan_does_not_start_an_in_process_worker_by_default(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main_module, "create_worker", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(main_module.settings, "run_worker_in_process", False)
+
+    async with lifespan(main_module.app):
+        pass
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_lifespan_runs_and_cleanly_shuts_down_an_in_process_worker_when_enabled(monkeypatch):
+    # Confirmed live: two separate OS processes (api + arq), even with
+    # eager model warm-up disabled, still each import their own copy of
+    # torch/transformers/langchain/langgraph -- enough on its own to OOM a
+    # free-tier 512MB container. Running the worker loop inside this
+    # process's own event loop instead means only one copy of each ever
+    # gets imported.
+    events = []
+
+    class FakeWorker:
+        async def async_run(self):
+            events.append("async_run started")
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                events.append("async_run cancelled")
+                raise
+
+        async def close(self):
+            events.append("closed")
+
+    fake_worker = FakeWorker()
+
+    def fake_create_worker(settings_cls, **kwargs):
+        assert settings_cls is main_module.WorkerSettings
+        assert kwargs == {"handle_signals": False}
+        return fake_worker
+
+    monkeypatch.setattr(main_module, "create_worker", fake_create_worker)
+    monkeypatch.setattr(main_module.settings, "run_worker_in_process", True)
+
+    async with lifespan(main_module.app):
+        # Let the worker task actually start running before shutdown.
+        await asyncio.sleep(0)
+
+    assert events == ["async_run started", "async_run cancelled", "closed"]
