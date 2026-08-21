@@ -288,16 +288,23 @@ export function ChatPanel({
   }
 
   return (
-    <div className="flex h-full flex-col">
+    // `min-w-0` here (and on the ScrollArea's message list below) matters
+    // because this panel sits in a flex row (see workspace-shell.tsx) --
+    // without it, a flex child's default `min-width: auto` lets its content
+    // (e.g. a long unbroken citation/URL inside a message, before the
+    // `break-words` fix in chat-message.tsx) force the child wider than its
+    // allotted pane width instead of wrapping, pushing the whole panel into
+    // horizontal scroll.
+    <div className="flex h-full min-w-0 flex-col">
       <ConversationPicker
         conversations={conversations}
         activeId={activeId}
         onSelect={setActiveId}
         onCreate={handleCreate}
       />
-      <div className="relative min-h-0 flex-1">
+      <div className="relative min-h-0 min-w-0 flex-1">
         <ScrollArea className="h-full p-3" viewportRef={scrollViewportRef}>
-          <div className="space-y-3">
+          <div className="min-w-0 space-y-3">
             {messages.length === 0 && !isStreaming && (
               <div className="space-y-3 p-4 text-center">
                 <p className="text-sm text-muted-foreground">

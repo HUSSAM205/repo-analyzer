@@ -68,7 +68,7 @@ function CodeBlock({ children, language }: { children: string; language?: string
   }
 
   return (
-    <div className="group relative my-2 overflow-x-auto rounded-md border border-border bg-black/30 p-3">
+    <div className="group relative my-2 max-w-full overflow-x-auto rounded-md border border-border bg-black/30 p-3">
       <button
         type="button"
         onClick={handleCopy}
@@ -105,14 +105,18 @@ export function ChatMessage({
     <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "max-w-[90%] rounded-lg px-3 py-2 text-sm",
+          // `break-words` (overflow-wrap: break-word) keeps a long unbroken
+          // token -- a long URL, identifier, or inline-code citation with no
+          // natural wrap point -- from forcing the whole chat panel to
+          // scroll horizontally instead of wrapping within the bubble.
+          "max-w-[90%] min-w-0 break-words rounded-lg px-3 py-2 text-sm",
           isUser ? "bg-primary text-primary-foreground" : "border border-border bg-card"
         )}
       >
         {isUser ? (
-          <p className="whitespace-pre-wrap">{content}</p>
+          <p className="whitespace-pre-wrap break-words">{content}</p>
         ) : (
-          <div className="prose prose-invert prose-sm max-w-none prose-p:my-1.5 prose-pre:my-0 prose-pre:bg-transparent prose-pre:p-0">
+          <div className="prose prose-invert prose-sm max-w-none break-words prose-p:my-1.5 prose-pre:my-0 prose-pre:bg-transparent prose-pre:p-0">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
@@ -129,7 +133,7 @@ export function ChatMessage({
                       <button
                         type="button"
                         onClick={() => onCitationClick?.(path)}
-                        className="mx-0.5 inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-1.5 py-0.5 align-middle font-mono text-[11px] text-primary transition-colors hover:bg-primary/20"
+                        className="mx-0.5 inline-flex max-w-full items-center gap-1 whitespace-normal break-all rounded-md border border-primary/40 bg-primary/10 px-1.5 py-0.5 align-middle font-mono text-[11px] text-primary transition-colors hover:bg-primary/20"
                       >
                         <FileCode2 className="h-3 w-3 shrink-0" />
                         {text}
@@ -137,7 +141,10 @@ export function ChatMessage({
                     );
                   }
                   return (
-                    <code className={cn("rounded bg-black/30 px-1 py-0.5 font-mono text-xs", className)} {...props}>
+                    <code
+                      className={cn("break-all rounded bg-black/30 px-1 py-0.5 font-mono text-xs", className)}
+                      {...props}
+                    >
                       {children}
                     </code>
                   );

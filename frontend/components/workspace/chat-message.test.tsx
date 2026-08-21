@@ -90,4 +90,40 @@ describe("ChatMessage", () => {
     expect(screen.queryByRole("button", { name: /main\(\)/ })).not.toBeInTheDocument();
     expect(screen.getByText("main()")).toBeInTheDocument();
   });
+
+  describe("word-break / overflow", () => {
+    const longToken =
+      "https://example.com/some-org/an-extremely-long-repository-name-with-no-natural-wrap-point/blob/main/very/deeply/nested/path/handler.py";
+
+    it("applies break-words to a user message bubble so a long unbroken token can't force horizontal scroll", () => {
+      render(<ChatMessage role="user" content={longToken} />);
+      const paragraph = screen.getByText(longToken);
+      expect(paragraph).toHaveClass("break-words");
+      // The bubble itself (the paragraph's parent) also needs the class --
+      // it's the element that's actually width-bounded (`max-w-[90%]`) by
+      // the chat panel; without break-words here too the browser has no
+      // wrap point on the outer box either.
+      expect(paragraph.parentElement).toHaveClass("break-words");
+    });
+
+    it("applies break-words to an assistant message's markdown container", () => {
+      render(<ChatMessage role="assistant" content={`See ${longToken} for details.`} />);
+      const bubble = screen.getByText(/See/).closest(".prose");
+      expect(bubble).toHaveClass("break-words");
+    });
+
+    it("keeps the CodeBlock scrollable within its own bounds via max-w-full + overflow-x-auto, not the whole panel", async () => {
+      render(<ChatMessage role="assistant" content={"```\n" + "x".repeat(300) + "\n```"} />);
+      const codeContainer = (await screen.findByText(/x{50,}/)).closest("div.group");
+      expect(codeContainer).toHaveClass("overflow-x-auto");
+      expect(codeContainer).toHaveClass("max-w-full");
+    });
+
+    it("breaks a long citation pill so it wraps instead of overflowing", async () => {
+      const longPath = "app/core/very/deeply/nested/module/path/some_extremely_long_handler_file_name.py";
+      render(<ChatMessage role="assistant" content={`See \`${longPath}:12-18\` for details.`} />);
+      const citation = screen.getByRole("button", { name: new RegExp(longPath.replace(/[/.]/g, "\\$&")) });
+      expect(citation).toHaveClass("break-all");
+    });
+  });
 });
