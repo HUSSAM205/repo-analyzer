@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import auth, chat, conversations, files, jobs, repos, search
 from app.config import get_settings
@@ -44,7 +45,33 @@ async def lifespan(app: FastAPI):
     yield
 
 
+def parse_cors_origins(raw: str) -> tuple[list[str], bool]:
+    """Parses Settings.cors_allowed_origins into (origins, allow_all).
+
+    allow_all is True when "*" is present -- a wildcard origin can't be
+    combined with credentialed requests (browsers reject
+    "Access-Control-Allow-Origin: *" alongside
+    "Access-Control-Allow-Credentials: true" outright), so callers must
+    disable allow_credentials when this is True.
+    """
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return origins, "*" in origins
+
+
 app = FastAPI(title="Repo Analyzer API", version="0.1.0", lifespan=lifespan)
+
+# Opt-in only -- see Settings.cors_allowed_origins for why this is empty by
+# default (the frontend proxies every call server-side, so the browser
+# never hits this API directly under the standard deployment).
+_cors_origins, _allow_all_origins = parse_cors_origins(settings.cors_allowed_origins)
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"] if _allow_all_origins else _cors_origins,
+        allow_credentials=not _allow_all_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 app.include_router(auth.router)
 app.include_router(repos.router)

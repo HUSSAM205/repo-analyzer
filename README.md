@@ -169,6 +169,66 @@ together. Visit `http://localhost:3000`. Copy `.env.example` to
 without it, chat gracefully shows a "not configured" message rather
 than failing.
 
+## Cloud deployment (Render + Vercel)
+
+Runs the backend (API + worker + Postgres) on Render and the frontend on
+Vercel, independently of any local machine. `render.yaml` at the repo root
+is a Render Blueprint that automates most of this.
+
+**1. Backend on Render**
+- In the Render dashboard: New -> Blueprint -> point it at this GitHub repo.
+  It provisions the `repo-analyzer-postgres` database, the
+  `repo-analyzer-api` web service, and the `repo-analyzer-worker` background
+  worker from `render.yaml`.
+- Enable pgvector once the database exists: open its Shell (or connect with
+  any `psql` client) and run `CREATE EXTENSION IF NOT EXISTS vector;` —
+  needed before the first deploy's Alembic migration runs.
+- Create a Redis instance manually: Dashboard -> New -> Key Value. Copy its
+  Internal Connection String into the `REDIS_URL` env var on **both**
+  `repo-analyzer-api` and `repo-analyzer-worker` (the blueprint leaves this
+  one for you rather than guessing at a resource type that may not match
+  your Render plan).
+- Generate a JWT keypair and upload it as Secret Files: run
+  `python backend/scripts/generate_keys.py` locally, then in
+  `repo-analyzer-api`'s Environment tab upload `backend/keys/jwt_private.pem`
+  and `jwt_public.pem` as Secret Files (Render mounts them at
+  `/etc/secrets/<filename>`, which is what `render.yaml` already points
+  `JWT_PRIVATE_KEY_PATH`/`JWT_PUBLIC_KEY_PATH` at — nothing else to set).
+- Fill in the env vars the blueprint marks as secret (prompted automatically
+  when you apply it): `GROQ_API_KEY` at minimum. `ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY` / `GEMINI_API_KEY` are optional alternates —
+  `get_llm_client()` falls back to whichever has a usable key.
+- Once deployed, confirm `https://<your-api>.onrender.com/health` returns
+  `{"status": "ok"}` — this is also the path Render's own uptime monitor
+  polls (`healthCheckPath` in `render.yaml`).
+- Startup note: the first deploy's cold CodeBERT model load can take a few
+  minutes under uvicorn's 4-worker config — see "Known limitations" below.
+
+**2. Frontend on Vercel**
+- Vercel dashboard: New Project -> import this GitHub repo -> set the root
+  directory to `frontend/`. Vercel auto-detects Next.js; no build command
+  changes needed.
+- Set one env var: `BACKEND_URL` = your Render API's public URL (e.g.
+  `https://repo-analyzer-api.onrender.com`, no trailing slash). This is a
+  **server-only** var (deliberately not `NEXT_PUBLIC_*`) — every backend
+  call is proxied through this Next.js app's own `app/api/**/route.ts`
+  handlers (see `frontend/lib/backend.ts`), so the browser never talks to
+  the Render API directly and no publicly-exposed API URL is needed.
+- Deploy. The chat SSE and annotation routes set
+  `export const maxDuration = 60` for Vercel's serverless function limit —
+  raise it if you're on a Pro/Enterprise plan and see long turns time out.
+
+**3. Wire them together**
+- `CORS_ALLOWED_ORIGINS` on the Render API can stay empty — the proxy
+  pattern above means the browser never calls the API's own origin, so no
+  CORS headers are needed. Only set it (to your Vercel URL, or `*`) if you
+  add something that calls the API straight from a browser.
+- Optional: point a custom domain at the Vercel project and update
+  `NEXT_PUBLIC_GITHUB_REPO_URL` (see above) if you want the header's GitHub
+  link to match.
+
+Both services redeploy automatically on every push to `master`.
+
 ## Known limitations
 
 Under the current `--workers 4` uvicorn configuration, the first request that triggers the CodeBERT model's cold load can cause a several-minute worker instability window: each of the four uvicorn worker processes independently loads the ~500MB model into memory via a process-local cache, resulting in resource contention and temporary service degradation. Recommended mitigations for production: bake the model into the Docker image at build time, warm the model in FastAPI's startup lifespan before accepting traffic, or reduce the number of workers on the embedding-serving path.

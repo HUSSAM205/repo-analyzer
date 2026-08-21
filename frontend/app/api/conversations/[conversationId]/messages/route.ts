@@ -3,6 +3,14 @@ import { backendUrl } from "@/lib/backend";
 import { getSessionToken } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
+// Vercel serverless functions are killed at a plan-dependent execution
+// limit (Hobby defaults to well under a minute) -- this route holds the
+// connection open for the entire chat stream, which can run past that on
+// a slow tool-calling turn (Groq's own retry/backoff alone can take up to
+// ~108s, see backend/app/core/llm_providers.py's _GROQ_MAX_ATTEMPTS). 60 is
+// the Hobby-plan ceiling; raise it if you're on Pro/Enterprise, where up to
+// 300s/900s is allowed.
+export const maxDuration = 60;
 
 export async function GET(request: Request, { params }: { params: { conversationId: string } }) {
   const token = getSessionToken();

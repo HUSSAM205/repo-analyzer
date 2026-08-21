@@ -1,0 +1,136 @@
+# Render Blueprint for the Repo Analyzer backend.
+#
+# Provisions the FastAPI API service, the ARQ background worker, and a
+# managed Postgres database with pgvector. Redis is deliberately NOT
+# declared as a blueprint resource here -- Render's Key Value (Redis)
+# offering has changed shape across blueprint spec versions, and a wrong
+# resource type would make this whole file fail to apply. Create it
+# manually instead (Dashboard -> New -> Key Value) and paste its Internal
+# Connection String into REDIS_URL below when prompted -- see README.md's
+# deployment checklist for the exact steps.
+#
+# Any envVar marked `sync: false` is a secret Render will prompt you to
+# fill in yourself when applying this blueprint -- nothing sensitive lives
+# in this file.
+
+databases:
+  - name: repo-analyzer-postgres
+    databaseName: repoanalyzer
+    user: repoanalyzer
+    plan: starter
+    postgresMajorVersion: "16"
+    # pgvector isn't enabled by default -- after the database is created,
+    # run `CREATE EXTENSION IF NOT EXISTS vector;` via Render's Postgres
+    # shell (or any psql client) before the first deploy runs Alembic
+    # migrations, which assume the extension already exists.
+
+services:
+  - type: web
+    name: repo-analyzer-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: repo-analyzer-postgres
+          property: connectionString
+      - key: REDIS_URL
+        sync: false
+      # RS256 keypair -- generate locally with
+      # `python backend/scripts/generate_keys.py`, then upload
+      # backend/keys/jwt_private.pem and jwt_public.pem as Render Secret
+      # Files (Dashboard -> this service -> Environment -> Secret Files).
+      # Render mounts them at /etc/secrets/<filename>, matching the paths
+      # below.
+      - key: JWT_PRIVATE_KEY_PATH
+        value: /etc/secrets/jwt_private.pem
+      - key: JWT_PUBLIC_KEY_PATH
+        value: /etc/secrets/jwt_public.pem
+      - key: JWT_ALGORITHM
+        value: RS256
+      - key: JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "60"
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+      # Verified live against the real Groq /models endpoint -- these are
+      # the two models this deployment's GroqClient fallback logic is
+      # actually tuned for (auto-switches between them on 404/429; see
+      # app/core/llm_providers.py). Older Llama 3.x model ids are retired
+      # on Groq's current catalog and will 404 if substituted here.
+      - key: GROQ_MODEL
+        value: qwen/qwen3.6-27b
+      - key: GROQ_FALLBACK_MODEL
+        value: openai/gpt-oss-20b
+      # No local Ollama server is reachable from Render -- leave empty so
+      # a cloud-provider failure surfaces its real error immediately
+      # instead of wasting time on a doomed local-fallback connection
+      # attempt. Set this only if OLLAMA_BASE_URL below points at a real,
+      # internet-reachable Ollama instance you run yourself.
+      - key: OLLAMA_MODEL
+        value: ""
+      - key: OLLAMA_BASE_URL
+        value: ""
+      # Optional additional providers -- get_llm_client() falls back to
+      # whichever of these has a usable key if GROQ_API_KEY is missing.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      # Empty unless something calls this API straight from a browser --
+      # the bundled Next.js frontend proxies every call server-side and
+      # never needs this. Set to your Vercel frontend's URL(s) (comma-
+      # separated) or "*" only if you add a direct-from-browser caller.
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: MAX_REPO_SIZE_MB
+        value: "500"
+      - key: MAX_FILES_PER_REPO
+        value: "5000"
+      - key: RATE_LIMIT_ANALYZE_PER_MINUTE
+        value: "5"
+      - key: RATE_LIMIT_CHAT_PER_MINUTE
+        value: "15"
+
+  - type: worker
+    name: repo-analyzer-worker
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: arq app.workers.settings.WorkerSettings
+    plan: starter
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: repo-analyzer-postgres
+          property: connectionString
+      - key: REDIS_URL
+        sync: false
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: qwen/qwen3.6-27b
+      - key: GROQ_FALLBACK_MODEL
+        value: openai/gpt-oss-20b
+      - key: OLLAMA_MODEL
+        value: ""
+      - key: OLLAMA_BASE_URL
+        value: ""
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: MAX_REPO_SIZE_MB
+        value: "500"
+      - key: MAX_FILES_PER_REPO
+        value: "5000"

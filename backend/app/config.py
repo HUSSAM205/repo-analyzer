@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +10,20 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://repoanalyzer:repoanalyzer@localhost:5432/repoanalyzer"
     redis_url: str = "redis://localhost:6379/0"
+
+    @field_validator("database_url")
+    @classmethod
+    def _ensure_asyncpg_driver(cls, value: str) -> str:
+        # Managed Postgres providers (Render, Railway, etc) hand out a plain
+        # "postgresql://" (or Heroku-style "postgres://") connection string
+        # -- SQLAlchemy's async engine needs the "+asyncpg" driver suffix
+        # explicitly, or create_async_engine raises at startup with no
+        # asyncpg dialect found. Normalizing here means the provider's
+        # connection string can be pasted in as-is, with zero manual editing.
+        for prefix in ("postgresql://", "postgres://"):
+            if value.startswith(prefix):
+                return "postgresql+asyncpg://" + value[len(prefix):]
+        return value
 
     jwt_private_key_path: str = "keys/jwt_private.pem"
     jwt_public_key_path: str = "keys/jwt_public.pem"
@@ -100,6 +115,17 @@ class Settings(BaseSettings):
     # deepseek-r1:7b does not.
     ollama_base_url: str = "http://host.docker.internal:11434/v1"
     ollama_model: str = "qwen2.5-coder:7b"
+
+    # Comma-separated list of browser origins allowed to call this API
+    # directly (e.g. "https://myapp.vercel.app,https://myapp.com"), or "*"
+    # for any origin. Empty by default -- this app's current frontend
+    # proxies every backend call server-side (see frontend/lib/backend.ts's
+    # BACKEND_URL), so the browser never calls this API directly and no
+    # CORS headers are needed. Set this only if something calls the API
+    # straight from a browser (a different frontend, direct API usage,
+    # etc). See app/main.py for how "*" is handled (credentials are
+    # disabled in that case -- required by the CORS spec, not optional).
+    cors_allowed_origins: str = ""
 
 
 @lru_cache
