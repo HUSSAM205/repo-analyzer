@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -85,7 +85,15 @@ function usePersistedWidth(
 ): readonly [number, (updater: number | ((prev: number) => number)) => void] {
   const [width, setWidthState] = useState(defaultWidth);
 
-  useEffect(() => {
+  // useLayoutEffect, not useEffect: confirmed live (real browser, not just
+  // reasoning about it) that a passive effect here is too late -- framer-
+  // motion's `motion.aside` (the consumer of this width, in the component
+  // below) had already established its animated width at the pre-hydration
+  // default by the time a useEffect-driven correction landed, and never
+  // picked up the later change, leaving the pane visibly stuck at the
+  // default width forever despite `localStorage` holding the right value.
+  // Synchronous-before-paint via useLayoutEffect avoids that race.
+  useLayoutEffect(() => {
     const stored = window.localStorage.getItem(storageKey);
     if (stored === null) return;
     const parsed = Number(stored);
