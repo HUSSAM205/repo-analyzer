@@ -42,7 +42,19 @@ class Settings(BaseSettings):
     # real repo's top-15 files alone still carried hundreds of chunks and
     # kept embedding running 100+ seconds. This caps total chunk count too
     # (see select_chunks_for_embedding); whichever limit is hit first wins.
-    embedding_max_chunks: int = 40
+    # Calibrated against real measurements on this deployment's CPU-only,
+    # thread-throttled CodeBERT setup (see embedding_cpu_threads): ~2.7s per
+    # chunk once the model is warm, so 20 chunks is roughly a 30-60s worst
+    # case -- a real, bounded ceiling, not the sub-5-second figure a repo's
+    # *file tree and briefing* actually hit (those no longer wait on
+    # embedding at all, see analyze_repo's two-phase commit). Getting
+    # embedding itself under 5s isn't physically achievable at this per-chunk
+    # cost without capping chunks so low search_code would have almost
+    # nothing to search -- lower this further only if literal near-zero
+    # search coverage is an acceptable tradeoff, or embedding_cpu_threads is
+    # raised (re-introducing the api-container-starving risk that setting
+    # was deliberately added to prevent).
+    embedding_max_chunks: int = 20
 
     rate_limit_analyze_per_minute: int = 5
     rate_limit_bucket_capacity: int = 5
