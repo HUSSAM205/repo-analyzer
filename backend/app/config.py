@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     # or not, so this only narrows search_code's index, not what the agent
     # can see.
     embedding_max_files: int = 15
+    # A files-only cap isn't sufficient on its own -- confirmed live, a large
+    # real repo's top-15 files alone still carried hundreds of chunks and
+    # kept embedding running 100+ seconds. This caps total chunk count too
+    # (see select_chunks_for_embedding); whichever limit is hit first wins.
+    embedding_max_chunks: int = 40
 
     rate_limit_analyze_per_minute: int = 5
     rate_limit_bucket_capacity: int = 5

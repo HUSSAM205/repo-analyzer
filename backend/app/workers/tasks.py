@@ -97,7 +97,9 @@ async def analyze_repo(ctx: dict, job_id: str) -> None:
                 job.stage = "embedding"
                 await db.commit()
 
-                chunks_to_embed = select_chunks_for_embedding(walk_result.chunks, settings.embedding_max_files)
+                chunks_to_embed = select_chunks_for_embedding(
+                    walk_result.chunks, settings.embedding_max_files, settings.embedding_max_chunks
+                )
                 embedded = await asyncio.to_thread(embed_chunks, chunks_to_embed)
                 job.progress = 90
                 await db.commit()

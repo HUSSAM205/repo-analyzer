@@ -187,15 +187,17 @@ def embed_chunks(chunks: list[Chunk], batch_size: int = 8) -> list[ChunkWithEmbe
 NON_EMBEDDABLE_EXTENSIONS = {".md", ".markdown", ".rst", ".txt", ".adoc", ".mdx"}
 
 
-def select_chunks_for_embedding(chunks: list[Chunk], max_files: int) -> list[Chunk]:
+def select_chunks_for_embedding(chunks: list[Chunk], max_files: int, max_chunks: int) -> list[Chunk]:
     # Bulk CodeBERT embedding is the dominant cost in analysis -- confirmed
     # live this session, minutes of sustained near-100%-CPU for a real
-    # medium-sized repo. Capping which *files* get embedded (not truncating
-    # chunks within a file) bounds that cost to a small, predictable number
-    # regardless of repo size, while list_directory/read_file (added
-    # separately) give the chat agent a way to inspect any file directly
-    # even if it was never embedded -- search_code just won't surface it by
-    # keyword/semantic search.
+    # medium-sized repo. Capping *files* alone isn't actually sufficient: a
+    # repo's 15 most substantive files (by the same ranking used here) can
+    # still carry hundreds of chunks between them for a large real project
+    # (confirmed live: lodash's top-15 files alone kept embedding running
+    # 100+ seconds under this cap without max_chunks) -- so this caps BOTH.
+    # list_directory/read_file (app/core/agent_tools.py) give the chat agent
+    # a way to inspect any file directly even if it was never embedded --
+    # search_code just won't surface it by keyword/semantic search.
     eligible_by_file: dict[str, list[Chunk]] = {}
     for chunk in chunks:
         ext = Path(chunk.file_path).suffix.lower()
@@ -211,8 +213,25 @@ def select_chunks_for_embedding(chunks: list[Chunk], max_files: int) -> list[Chu
     ranked_paths = sorted(
         eligible_by_file, key=lambda p: sum(len(c.content) for c in eligible_by_file[p]), reverse=True
     )[:max_files]
-    ranked_set = set(ranked_paths)
-    return [c for c in chunks if c.file_path in ranked_set]
+
+    # Walk the ranked files in order, taking whole files' worth of chunks
+    # until the total chunk budget runs out -- a file that would blow the
+    # budget is skipped entirely rather than truncated mid-file, so no
+    # chunk is ever embedded without the rest of its immediate neighbors
+    # (e.g. a function chunk without the sibling chunks around it would be
+    # a confusing, partial view for search_code to surface).
+    selected: list[Chunk] = []
+    for path in ranked_paths:
+        file_chunks = eligible_by_file[path]
+        if len(selected) + len(file_chunks) > max_chunks:
+            if selected:
+                break
+            # Even the single largest file alone exceeds the budget --
+            # still cap at max_chunks rather than embedding nothing at all.
+            selected.extend(file_chunks[:max_chunks])
+            break
+        selected.extend(file_chunks)
+    return selected
 
 
 def ingest_local_directory(root_dir: Path, max_files: int) -> IngestionResult:

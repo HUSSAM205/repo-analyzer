@@ -166,7 +166,7 @@ def test_select_chunks_for_embedding_excludes_markdown_and_docs():
         _chunk("notes.txt", "plain text"),
     ]
 
-    selected = select_chunks_for_embedding(chunks, max_files=15)
+    selected = select_chunks_for_embedding(chunks, max_files=15, max_chunks=1000)
 
     selected_paths = {c.file_path for c in selected}
     assert selected_paths == {"main.py"}
@@ -175,10 +175,11 @@ def test_select_chunks_for_embedding_excludes_markdown_and_docs():
 def test_select_chunks_for_embedding_caps_to_the_most_substantive_files():
     # 20 candidate files, each with one chunk whose size encodes its rank
     # (file 0 has the most content, file 19 the least) -- only the top 15 by
-    # total chunked content should survive the cap.
+    # total chunked content should survive the cap. max_chunks set well
+    # above 20 so it can't be the thing doing the capping here.
     chunks = [_chunk(f"file_{i}.py", content="x" * (200 - i)) for i in range(20)]
 
-    selected = select_chunks_for_embedding(chunks, max_files=15)
+    selected = select_chunks_for_embedding(chunks, max_files=15, max_chunks=1000)
 
     selected_paths = {c.file_path for c in selected}
     assert len(selected_paths) == 15
@@ -198,11 +199,47 @@ def test_select_chunks_for_embedding_keeps_all_chunks_of_a_selected_file():
         _chunk("small.py", "w"),
     ]
 
-    selected = select_chunks_for_embedding(chunks, max_files=1)
+    selected = select_chunks_for_embedding(chunks, max_files=1, max_chunks=1000)
 
     assert len(selected) == 3
     assert all(c.file_path == "big.py" for c in selected)
 
 
 def test_select_chunks_for_embedding_handles_empty_input():
-    assert select_chunks_for_embedding([], max_files=15) == []
+    assert select_chunks_for_embedding([], max_files=15, max_chunks=40) == []
+
+
+def test_select_chunks_for_embedding_caps_total_chunk_count_even_within_the_file_cap():
+    # Regression test: a files-only cap isn't sufficient -- confirmed live,
+    # a large real repo's top-15 files alone still carried hundreds of
+    # chunks and kept embedding running 100+ seconds. Here, 3 files (well
+    # under max_files=15) contribute 30 chunks each -- max_chunks=40 must
+    # stop well before all 3 files' chunks are included.
+    # Distinguishable total sizes so file ranking is deterministic: a.py has
+    # the most content, then b.py, then c.py.
+    chunks = (
+        [_chunk("a.py", content="a" * 10) for _ in range(30)]
+        + [_chunk("b.py", content="b" * 5) for _ in range(30)]
+        + [_chunk("c.py", content="c" * 1) for _ in range(30)]
+    )
+
+    selected = select_chunks_for_embedding(chunks, max_files=15, max_chunks=40)
+
+    assert len(selected) <= 40
+    # Whole-file grouping: a.py (rank 1, 30 chunks) fits entirely under the
+    # budget; b.py (rank 2, would add 30 more, blowing the 40 budget) must
+    # be skipped entirely rather than truncated mid-file.
+    selected_paths = {c.file_path for c in selected}
+    assert selected_paths == {"a.py"}
+    assert len(selected) == 30
+
+
+def test_select_chunks_for_embedding_caps_a_single_oversized_file_rather_than_embedding_nothing():
+    # Even the single largest (only) file alone exceeds max_chunks -- still
+    # embed a bounded prefix of it rather than returning nothing at all.
+    chunks = [_chunk("huge.py", content=f"chunk{i}") for i in range(100)]
+
+    selected = select_chunks_for_embedding(chunks, max_files=15, max_chunks=40)
+
+    assert len(selected) == 40
+    assert all(c.file_path == "huge.py" for c in selected)
