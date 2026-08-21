@@ -1,59 +1,52 @@
-# Render Blueprint for the Repo Analyzer backend.
+# Render Blueprint for the Repo Analyzer backend -- 100%-free-tier setup.
 #
-# Provisions the FastAPI API service, the ARQ background worker, and a
-# managed Postgres database with pgvector. Redis is deliberately NOT
-# declared as a blueprint resource here -- Render's Key Value (Redis)
-# offering has changed shape across blueprint spec versions, and a wrong
-# resource type would make this whole file fail to apply. Create it
-# manually instead (Dashboard -> New -> Key Value) and paste its Internal
-# Connection String into REDIS_URL below when prompted -- see README.md's
-# deployment checklist for the exact steps.
+# A single free Render web service runs BOTH the FastAPI API and the ARQ
+# background worker (backend/scripts/start_unified.sh), because Render has
+# no free tier for standalone worker services at all. Postgres (with
+# pgvector) and Redis are NOT provisioned here either -- Render's own free
+# Postgres is deleted 30 days after creation, which defeats "permanent."
+# Use an external always-free provider instead:
+#   - Postgres: neon.tech or supabase.com (both have a real free tier with
+#     pgvector support, no expiration).
+#   - Redis: upstash.com (real free tier, TLS `rediss://` URL).
+# Paste their connection strings into DATABASE_URL / REDIS_URL below when
+# Render prompts for them -- see README.md's deployment checklist for the
+# exact steps (enabling pgvector, where to find each connection string).
 #
 # Any envVar marked `sync: false` is a secret Render will prompt you to
 # fill in yourself when applying this blueprint -- nothing sensitive lives
 # in this file.
 #
-# Plan tiers, confirmed against Render's own docs (render.com/docs/free):
-# - web (repo-analyzer-api): `free` is real, but spins down after 15min
-#   idle (~1min cold start on the next request) and caps at 750 instance
-#   hours/month -- fine for evaluation, not a true always-on deployment.
-# - repo-analyzer-postgres: `free` is real, but the database is deleted
-#   30 days after creation (14-day grace period to upgrade first) and
-#   capped at 1GB. Fine to start with; you'll need to upgrade before day 30
-#   for anything you want to keep running.
-# - repo-analyzer-worker: Render has **no free tier for background
-#   workers at all** -- `starter` (paid) is the cheapest option that
-#   exists, not a default I chose. Without it, no repo analysis or
-#   embedding job ever runs (arq app.workers.settings.WorkerSettings).
-# Render explicitly documents free tiers as "not for production
-# applications" -- swap web/postgres to `starter` (or higher) once you're
-# past evaluating this and actually want 24/7 uptime with a persisted
-# database.
-
-databases:
-  - name: repo-analyzer-postgres
-    databaseName: repoanalyzer
-    user: repoanalyzer
-    plan: free
-    postgresMajorVersion: "16"
-    # pgvector isn't enabled by default -- after the database is created,
-    # run `CREATE EXTENSION IF NOT EXISTS vector;` via Render's Postgres
-    # shell (or any psql client) before the first deploy runs Alembic
-    # migrations, which assume the extension already exists.
+# Tradeoff worth knowing: running the worker in the same container as the
+# API (rather than the isolated two-container setup docker-compose.yml
+# uses locally) means a heavy embedding job can slow HTTP responses while
+# it runs -- see start_unified.sh's own comment. The free web plan also
+# spins down after 15min idle (~1min cold start on the next request). Both
+# are the real cost of this being free, not something either script hides.
 
 services:
   - type: web
-    name: repo-analyzer-api
+    name: repo-analyzer
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
+    dockerCommand: ./scripts/start_unified.sh
     plan: free
     healthCheckPath: /health
     envVars:
+      # External managed Postgres (Neon/Supabase) -- paste its connection
+      # string as-is. Settings.database_url upgrades a plain "postgresql://"
+      # to "postgresql+asyncpg://" automatically, and db/session.py strips
+      # the sslmode/channel_binding query params Neon/Supabase include by
+      # default (asyncpg wants TLS expressed differently -- both files
+      # explain why in their own comments), so no manual editing is needed.
       - key: DATABASE_URL
-        fromDatabase:
-          name: repo-analyzer-postgres
-          property: connectionString
+        sync: false
+      # External Upstash Redis -- paste its `rediss://` connection string
+      # as-is. Both consumers (arq's RedisSettings.from_dsn and redis-py's
+      # Redis.from_url, see app/workers/settings.py and
+      # app/core/rate_limit.py) recognize the "rediss://" scheme and enable
+      # TLS automatically -- no extra config needed.
       - key: REDIS_URL
         sync: false
       # RS256 keypair -- generate locally with
@@ -114,42 +107,3 @@ services:
         value: "5"
       - key: RATE_LIMIT_CHAT_PER_MINUTE
         value: "15"
-
-  - type: worker
-    name: repo-analyzer-worker
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: arq app.workers.settings.WorkerSettings
-    # No free tier exists for background workers on Render -- see the
-    # top-of-file note. This is the cheapest plan that's actually available.
-    plan: starter
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: repo-analyzer-postgres
-          property: connectionString
-      - key: REDIS_URL
-        sync: false
-      - key: LLM_PROVIDER
-        value: groq
-      - key: GROQ_API_KEY
-        sync: false
-      - key: GROQ_MODEL
-        value: qwen/qwen3.6-27b
-      - key: GROQ_FALLBACK_MODEL
-        value: openai/gpt-oss-20b
-      - key: OLLAMA_MODEL
-        value: ""
-      - key: OLLAMA_BASE_URL
-        value: ""
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: MAX_REPO_SIZE_MB
-        value: "500"
-      - key: MAX_FILES_PER_REPO
-        value: "5000"

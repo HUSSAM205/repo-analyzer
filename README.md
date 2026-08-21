@@ -171,53 +171,59 @@ than failing.
 
 ## Cloud deployment (Render + Vercel)
 
-Runs the backend (API + worker + Postgres) on Render and the frontend on
-Vercel, independently of any local machine. `render.yaml` at the repo root
-is a Render Blueprint that automates most of this.
+Runs the backend on Render and the frontend on Vercel, independently of any
+local machine, on a 100%-free stack: `render.yaml` provisions a single free
+Render web service, and Postgres/Redis come from external always-free
+providers (Render's own free Postgres is deleted after 30 days, which isn't
+"permanent"). The tradeoffs of going fully free are real and documented in
+`render.yaml`'s and `backend/scripts/start_unified.sh`'s own comments —
+worth a read before you commit to this path for something beyond a demo.
 
-**1. Backend on Render**
-- Billing note first: `render.yaml` uses Render's free plan for the API and
-  Postgres (real, but the API spins down after 15min idle and free Postgres
-  is deleted 30 days after creation), and `starter` (paid) for the
-  background worker — Render has no free tier for workers at all, and the
-  worker is what actually runs repo analysis/embedding jobs, so it can't be
-  skipped. A payment method is required for that one service regardless.
+**1. Datastores (external, both genuinely free with no expiration)**
+- Postgres — [neon.tech](https://neon.tech) or [supabase.com](https://supabase.com):
+  create a project, then enable pgvector via their SQL editor:
+  `CREATE EXTENSION IF NOT EXISTS vector;` (needed before the first
+  deploy's Alembic migration runs). Copy the connection string they give
+  you as-is — `Settings.database_url` upgrades a plain `postgresql://` to
+  `postgresql+asyncpg://` automatically, and `db/session.py` strips the
+  `sslmode`/`channel_binding` params these providers include by default.
+- Redis — [upstash.com](https://upstash.com): create a Redis database,
+  copy its `rediss://` connection string as-is (the extra "s" means
+  TLS — both `arq` and `redis-py`, this app's two Redis clients,
+  recognize that scheme natively, no extra config needed).
+
+**2. Backend on Render**
 - In the Render dashboard: New -> Blueprint -> point it at this GitHub repo.
-  It provisions the `repo-analyzer-postgres` database, the
-  `repo-analyzer-api` web service, and the `repo-analyzer-worker` background
-  worker from `render.yaml`. This one step (connect + apply) can't be done
-  from the Render CLI — Blueprint provisioning is Dashboard/API-only, the
-  CLI only validates a render.yaml, it doesn't apply one.
-- Enable pgvector once the database exists: open its Shell (or connect with
-  any `psql` client) and run `CREATE EXTENSION IF NOT EXISTS vector;` —
-  needed before the first deploy's Alembic migration runs.
-- Create a Redis instance manually: Dashboard -> New -> Key Value. Copy its
-  Internal Connection String into the `REDIS_URL` env var on **both**
-  `repo-analyzer-api` and `repo-analyzer-worker` (the blueprint leaves this
-  one for you rather than guessing at a resource type that may not match
-  your Render plan).
+  It provisions one free web service, `repo-analyzer`, running
+  `backend/scripts/start_unified.sh` — both the FastAPI API and the ARQ
+  background worker in the same container, since Render has no free tier
+  for standalone worker services. This one step (connect + apply) can't be
+  done from the Render CLI — Blueprint provisioning is Dashboard/API-only,
+  the CLI only validates a render.yaml, it doesn't apply one.
 - Generate a JWT keypair and upload it as Secret Files: run
-  `python backend/scripts/generate_keys.py` locally, then in
-  `repo-analyzer-api`'s Environment tab upload `backend/keys/jwt_private.pem`
-  and `jwt_public.pem` as Secret Files (Render mounts them at
+  `python backend/scripts/generate_keys.py` locally, then in this service's
+  Environment tab upload `backend/keys/jwt_private.pem` and
+  `jwt_public.pem` as Secret Files (Render mounts them at
   `/etc/secrets/<filename>`, which is what `render.yaml` already points
   `JWT_PRIVATE_KEY_PATH`/`JWT_PUBLIC_KEY_PATH` at — nothing else to set).
 - Fill in the env vars the blueprint marks as secret (prompted automatically
-  when you apply it): `GROQ_API_KEY` at minimum. `ANTHROPIC_API_KEY` /
-  `OPENAI_API_KEY` / `GEMINI_API_KEY` are optional alternates —
-  `get_llm_client()` falls back to whichever has a usable key.
-- Once deployed, confirm `https://<your-api>.onrender.com/health` returns
-  `{"status": "ok"}` — this is also the path Render's own uptime monitor
-  polls (`healthCheckPath` in `render.yaml`).
-- Startup note: the first deploy's cold CodeBERT model load can take a few
-  minutes under uvicorn's 4-worker config — see "Known limitations" below.
+  when you apply it): `DATABASE_URL` and `REDIS_URL` from step 1, and
+  `GROQ_API_KEY` at minimum. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
+  `GEMINI_API_KEY` are optional alternates — `get_llm_client()` falls back
+  to whichever has a usable key.
+- Once deployed, confirm `https://<your-service>.onrender.com/health`
+  returns `{"status": "ok"}` — this is also the path Render's own uptime
+  monitor polls (`healthCheckPath` in `render.yaml`).
+- Startup note: the free plan spins down after 15min idle (~1min cold
+  start on the next request), and the first request after any cold start
+  also pays CodeBERT's model-load time — see "Known limitations" below.
 
-**2. Frontend on Vercel**
+**3. Frontend on Vercel**
 - Vercel dashboard: New Project -> import this GitHub repo -> set the root
   directory to `frontend/`. Vercel auto-detects Next.js; no build command
   changes needed.
-- Set one env var: `BACKEND_URL` = your Render API's public URL (e.g.
-  `https://repo-analyzer-api.onrender.com`, no trailing slash). This is a
+- Set one env var: `BACKEND_URL` = your Render service's public URL (e.g.
+  `https://repo-analyzer.onrender.com`, no trailing slash). This is a
   **server-only** var (deliberately not `NEXT_PUBLIC_*`) — every backend
   call is proxied through this Next.js app's own `app/api/**/route.ts`
   handlers (see `frontend/lib/backend.ts`), so the browser never talks to
@@ -226,7 +232,7 @@ is a Render Blueprint that automates most of this.
   `export const maxDuration = 60` for Vercel's serverless function limit —
   raise it if you're on a Pro/Enterprise plan and see long turns time out.
 
-**3. Wire them together**
+**4. Wire them together**
 - `CORS_ALLOWED_ORIGINS` on the Render API can stay empty — the proxy
   pattern above means the browser never calls the API's own origin, so no
   CORS headers are needed. Only set it (to your Vercel URL, or `*`) if you
