@@ -1,0 +1,163 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light theme -- off-white zinc-50 page background (not a harsh pure
+       white), zinc-900 text, zinc-200 borders. Cards stay pure white so
+       they read as subtly elevated against the zinc-50 page, the same
+       elevation relationship the dark theme already has (zinc-900 cards on
+       a zinc-950 page). The app's actual runtime default is "dark" (see
+       app/layout.tsx's ThemeProvider defaultTheme) so existing
+       users/screenshots don't see a surprise light flash. */
+    --background: 0 0% 98%;       /* zinc-50 */
+    --foreground: 240 5.9% 10%;   /* zinc-900 */
+    --card: 0 0% 100%;
+    --card-foreground: 240 5.9% 10%;
+    --border: 240 5.9% 90%;       /* zinc-200 */
+    --input: 240 5.9% 90%;
+    --ring: 217 91% 55%;
+    --primary: 217 91% 55%;
+    --primary-foreground: 210 20% 98%;
+    --secondary: 240 4.8% 95.9%;  /* zinc-100 */
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%; /* zinc-500 */
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 210 20% 98%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    /* Dark theme -- deep slate / "cyber-zinc", the app's original and
+       still-default look. */
+    --background: 240 10% 3.9%;   /* zinc-950 */
+    --foreground: 240 4.8% 95.9%; /* zinc-100 */
+    --card: 240 5.9% 10%;         /* zinc-900 */
+    --card-foreground: 240 4.8% 95.9%;
+    --border: 240 3.7% 15.9%;     /* zinc-800 */
+    --input: 240 3.7% 15.9%;
+    --ring: 217 91% 60%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 210 20% 98%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 240 4.8% 95.9%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%; /* zinc-400 */
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 240 4.8% 95.9%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 20% 98%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "cv11", "ss01";
+  }
+}
+
+@layer utilities {
+  /*
+   * Soft glassmorphism, tuned separately per theme -- a light background
+   * needs a dark-tinted, more opaque glass to read as "frosted" at all,
+   * while the dark theme's original near-white tint stays as-is.
+   */
+  .glass {
+    @apply border border-black/[0.06] bg-black/[0.03] backdrop-blur-xl dark:border-white/[0.08] dark:bg-white/[0.03];
+  }
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .elevated-ring {
+    @apply ring-1 ring-zinc-700/50 shadow-sm;
+  }
+  /*
+   * Subtle glow for pill-style accents (tech-stack badges, quick-prompt
+   * pills, the primary-field badge, etc). Uses the app's existing
+   * `--primary` token rather than a new color, and stays low-opacity so it
+   * reads as a soft halo, not a neon effect.
+   */
+  .glow-pill {
+    @apply ring-1 ring-inset ring-primary/25 transition-shadow duration-200;
+    box-shadow: 0 0 10px -2px hsl(var(--primary) / 0.45);
+  }
+  .glow-pill:hover {
+    box-shadow: 0 0 14px -2px hsl(var(--primary) / 0.6);
+  }
+  /*
+   * Subtle border glow for major structural panels (sidebar, workbench
+   * chrome) in dark mode only -- a plain 1px border reads as flat/dead on
+   * the deep obsidian background; a faint primary-tinted inset ring gives
+   * it a bit of depth without turning into a neon outline. Left as a plain
+   * border in light mode, where the same glow would just look like a blue
+   * smudge against the light background.
+   */
+  .panel-glow {
+    @apply dark:shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.08)];
+  }
+  /*
+   * Animated gradient headline text for the hero. Falls back to a static
+   * gradient (no @keyframes) under prefers-reduced-motion -- still reads as
+   * a deliberate gradient heading, just without the slow drift.
+   */
+  .gradient-text {
+    background: linear-gradient(90deg, hsl(var(--primary)), #a855f7 45%, hsl(var(--primary)));
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .gradient-text {
+      animation: gradient-flow 6s ease infinite;
+    }
+  }
+}
+
+@keyframes gradient-flow {
+  0% {
+    background-position: 0% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
+}
+
+/*
+ * Line numbers for Shiki-highlighted code blocks.
+ * Shiki's codeToHtml() wraps every source line in <span class="line">...</span>
+ * inside <code> (verified against the pinned shiki@1.16.2 output). We use a CSS
+ * counter on those wrapper spans rather than a custom Shiki transformer.
+ */
+.shiki-line-numbers code {
+  counter-reset: line;
+  display: grid;
+}
+.shiki-line-numbers code .line::before {
+  counter-increment: line;
+  content: counter(line);
+  display: inline-block;
+  width: 2.25rem;
+  margin-right: 1rem;
+  text-align: right;
+  color: hsl(var(--muted-foreground));
+  user-select: none;
+}
+/*
+ * Shiki does not trim the source file's trailing newline, so codeToHtml()
+ * always emits one extra empty <span class="line"></span> after the last
+ * real line of content. Hide it so the viewer doesn't show a phantom
+ * numbered blank line at the bottom of every file.
+ */
+.shiki-line-numbers code .line:last-child:empty {
+  display: none;
+}

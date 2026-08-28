@@ -1,0 +1,1144 @@
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+
+from app.core.llm import Message, ToolCall
+from app.core.llm_providers import (
+    AnthropicClient,
+    OpenAIClient,
+    _ThinkTagFilter,
+    _to_anthropic_messages,
+    _to_openai_messages,
+)
+
+
+def test_to_anthropic_messages_converts_user_and_assistant():
+    messages = [
+        Message(role="user", content="What does main do?"),
+        Message(role="assistant", content="It's the entry point."),
+    ]
+    result = _to_anthropic_messages(messages)
+    assert result == [
+        {"role": "user", "content": "What does main do?"},
+        {"role": "assistant", "content": "It's the entry point."},
+    ]
+
+
+def test_to_anthropic_messages_converts_tool_call_and_result():
+    tool_call = ToolCall(id="call_1", name="search_code", arguments={"query": "main"})
+    messages = [
+        Message(role="assistant", content="", tool_calls=[tool_call]),
+        Message(role="tool", content="found it", tool_call_id="call_1"),
+    ]
+    result = _to_anthropic_messages(messages)
+    assert result[0]["role"] == "assistant"
+    assert result[0]["content"][0]["type"] == "tool_use"
+    assert result[0]["content"][0]["id"] == "call_1"
+    assert result[1]["role"] == "user"
+    assert result[1]["content"][0]["type"] == "tool_result"
+    assert result[1]["content"][0]["tool_use_id"] == "call_1"
+
+
+def test_to_openai_messages_converts_tool_call_and_result():
+    tool_call = ToolCall(id="call_1", name="search_code", arguments={"query": "main"})
+    messages = [
+        Message(role="assistant", content="", tool_calls=[tool_call]),
+        Message(role="tool", content="found it", tool_call_id="call_1"),
+    ]
+    result = _to_openai_messages(messages)
+    assert result[0]["role"] == "assistant"
+    assert result[0]["tool_calls"][0]["id"] == "call_1"
+    assert result[0]["tool_calls"][0]["function"]["name"] == "search_code"
+    assert result[1] == {"role": "tool", "tool_call_id": "call_1", "content": "found it"}
+
+
+# A distinctive marker planted inside a raw exception message, standing in for
+# whatever sensitive detail a real provider SDK exception could carry (auth
+# headers, connection strings, request/response bodies, etc). The assertions
+# below check this string never reaches the LLMEvent surfaced to SSE clients.
+_SECRET_MARKER = "secret_connection_string_12345"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_sanitizes_provider_exception():
+    client = AnthropicClient(api_key="test-key", model="test-model")
+    client._client.messages.stream = MagicMock(side_effect=RuntimeError(_SECRET_MARKER))
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert len(events) == 1
+    assert events[0].type == "error"
+    assert events[0].error is not None
+    assert _SECRET_MARKER not in events[0].error
+
+
+def test_to_gemini_contents_converts_user_and_assistant():
+    from app.core.llm_providers import _to_gemini_contents
+
+    messages = [
+        Message(role="user", content="What does main do?"),
+        Message(role="assistant", content="It's the entry point."),
+    ]
+    result = _to_gemini_contents(messages)
+    assert result[0].role == "user"
+    assert result[0].parts[0].text == "What does main do?"
+    assert result[1].role == "model"
+    assert result[1].parts[0].text == "It's the entry point."
+
+
+def test_to_gemini_contents_converts_tool_call_and_result_matched_by_name():
+    from app.core.llm_providers import _to_gemini_contents
+
+    tool_call = ToolCall(id="call_1", name="search_code", arguments={"query": "main"})
+    messages = [
+        Message(role="assistant", content="", tool_calls=[tool_call]),
+        Message(role="tool", content="found it", tool_call_id="call_1"),
+    ]
+    result = _to_gemini_contents(messages)
+    assert result[0].role == "model"
+    assert result[0].parts[0].function_call.name == "search_code"
+    # Gemini's Content.role only accepts "user"/"model" -- a function_response
+    # is sent back as role="user", not a "tool" role (which doesn't exist).
+    assert result[1].role == "user"
+    assert result[1].parts[0].function_response.name == "search_code"
+
+
+def test_to_gemini_contents_attaches_thought_signature_to_replayed_function_call():
+    from app.core.llm_providers import _to_gemini_contents
+
+    tool_call = ToolCall(id="call_1", name="search_code", arguments={"query": "main"})
+    messages = [Message(role="assistant", content="", tool_calls=[tool_call])]
+
+    # Without a cached signature, the replayed function_call part carries none.
+    result_without = _to_gemini_contents(messages)
+    assert result_without[0].parts[0].thought_signature is None
+
+    # Gemini 3 requires echoing back the opaque thought_signature it issued
+    # alongside the original function_call on any later turn that replays it,
+    # or the API rejects the request with a 400 -- see GeminiClient.stream_chat.
+    result_with = _to_gemini_contents(messages, thought_signatures={"call_1": b"opaque-signature-bytes"})
+    assert result_with[0].parts[0].thought_signature == b"opaque-signature-bytes"
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_streams_tokens_and_completes(monkeypatch):
+    from app.core.llm_providers import GeminiClient
+
+    class FakeChunk:
+        def __init__(self, text=None, function_calls=None):
+            self.text = text
+            self.function_calls = function_calls
+
+    async def fake_stream():
+        yield FakeChunk(text="It's ")
+        yield FakeChunk(text="the entry point.")
+
+    class FakeModels:
+        async def generate_content_stream(self, **kwargs):
+            return fake_stream()
+
+    class FakeAio:
+        def __init__(self):
+            self.models = FakeModels()
+
+    client = GeminiClient(api_key="test-key", model="test-model")
+    # google-genai 2.18.1's Client.aio is a read-only property (no setter),
+    # so it can't be assigned on the instance like a plain attribute
+    # (`client._client.aio = ...` raises AttributeError). GeminiClient.
+    # stream_chat only ever touches `self._client.aio`, so swap out the
+    # whole `_client` for a minimal stand-in instead of the real
+    # genai.Client -- narrower than patching the shared Client class.
+    monkeypatch.setattr(client, "_client", SimpleNamespace(aio=FakeAio()))
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="What does main do?")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert [e.type for e in events] == ["token", "token", "message_done"]
+    assert events[-1].message.content == "It's the entry point."
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_captures_and_replays_thought_signature_across_turns(monkeypatch):
+    from app.core.llm_providers import GeminiClient
+
+    # Shapes mirroring the real google-genai response structure closely
+    # enough to exercise _gemini_response_parts (chunk.candidates[0].content
+    # .parts), since chunk.function_calls (the SDK's convenience property)
+    # discards the sibling thought_signature and can't be used to test this.
+    class FakeFunctionCall:
+        def __init__(self, name, args):
+            self.name = name
+            self.args = args
+
+    class FakePart:
+        def __init__(self, function_call=None, thought_signature=None):
+            self.function_call = function_call
+            self.thought_signature = thought_signature
+
+    class FakeContent:
+        def __init__(self, parts):
+            self.parts = parts
+
+    class FakeCandidate:
+        def __init__(self, parts):
+            self.content = FakeContent(parts)
+
+    class FakeChunk:
+        def __init__(self, text=None, parts=None):
+            self.text = text
+            self.candidates = [FakeCandidate(parts)] if parts is not None else []
+
+    call_log: list[dict] = []
+
+    class FakeModels:
+        async def generate_content_stream(self, **kwargs):
+            call_log.append(kwargs)
+            if len(call_log) == 1:
+                async def turn1():
+                    yield FakeChunk(parts=[FakePart(
+                        function_call=FakeFunctionCall(name="search_code", args={"query": "main"}),
+                        thought_signature=b"sig-from-turn-1",
+                    )])
+                return turn1()
+
+            if len(call_log) == 2:
+                # The model calls a tool again on turn 2 (rather than
+                # finishing), so this test can compare a *second* ToolCall.id
+                # against turn 1's -- exercising the exact scenario the
+                # call_counter regression this test guards against would
+                # break: a stream_chat-local counter that reset to 0 on every
+                # call would reissue "call_1" here too, colliding with turn
+                # 1's id in both _thought_signatures and the tool-name lookup
+                # in _to_gemini_contents.
+                async def turn2():
+                    yield FakeChunk(parts=[FakePart(
+                        function_call=FakeFunctionCall(name="search_code", args={"query": "helper"}),
+                        thought_signature=b"sig-from-turn-2",
+                    )])
+                return turn2()
+
+            async def turn3():
+                yield FakeChunk(text="Done.")
+            return turn3()
+
+    class FakeAio:
+        def __init__(self):
+            self.models = FakeModels()
+
+    client = GeminiClient(api_key="test-key", model="test-model")
+    monkeypatch.setattr(client, "_client", SimpleNamespace(aio=FakeAio()))
+
+    # Turn 1: the model emits a tool call carrying a thought_signature.
+    turn1_events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+    assert turn1_events[0].type == "tool_call"
+    tool_call_1 = turn1_events[0].tool_calls[0]
+    assert client._thought_signatures[tool_call_1.id] == b"sig-from-turn-1"
+
+    # Turn 2: replay that tool call plus its result. The outgoing request
+    # must carry the cached thought_signature on the replayed function_call
+    # part, or Gemini 3 rejects it with a 400 INVALID_ARGUMENT. The model
+    # responds with a second tool call.
+    messages_turn2 = [
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="", tool_calls=[tool_call_1]),
+        Message(role="tool", content="found it", tool_call_id=tool_call_1.id),
+    ]
+    turn2_events = [
+        event
+        async for event in client.stream_chat(messages=messages_turn2, tools=[], system_prompt="sys")
+    ]
+    assert turn2_events[0].type == "tool_call"
+    tool_call_2 = turn2_events[0].tool_calls[0]
+    assert client._thought_signatures[tool_call_2.id] == b"sig-from-turn-2"
+
+    # The regression guard: turn 2's ToolCall.id must differ from turn 1's.
+    # If the id-generating counter were ever moved back to stream_chat-local
+    # state, both turns would independently produce "call_1" and this would
+    # fail.
+    assert tool_call_2.id != tool_call_1.id
+
+    sent_contents_turn2 = call_log[1]["contents"]
+    replayed_assistant_content_turn2 = next(c for c in sent_contents_turn2 if c.role == "model")
+    assert replayed_assistant_content_turn2.parts[0].thought_signature == b"sig-from-turn-1"
+
+    # Turn 3: replay both tool calls plus their results and let the model
+    # finish, confirming both cached signatures survive together and the
+    # conversation still completes normally.
+    messages_turn3 = [
+        *messages_turn2,
+        Message(role="assistant", content="", tool_calls=[tool_call_2]),
+        Message(role="tool", content="found it too", tool_call_id=tool_call_2.id),
+    ]
+    turn3_events = [
+        event
+        async for event in client.stream_chat(messages=messages_turn3, tools=[], system_prompt="sys")
+    ]
+    assert turn3_events[-1].type == "message_done"
+
+    sent_contents_turn3 = call_log[2]["contents"]
+    replayed_assistant_contents_turn3 = [c for c in sent_contents_turn3 if c.role == "model"]
+    assert replayed_assistant_contents_turn3[0].parts[0].thought_signature == b"sig-from-turn-1"
+    assert replayed_assistant_contents_turn3[1].parts[0].thought_signature == b"sig-from-turn-2"
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_sanitizes_provider_exception(monkeypatch):
+    from app.core.llm_providers import GeminiClient
+
+    client = GeminiClient(api_key="test-key", model="test-model")
+
+    class FakeModels:
+        async def generate_content_stream(self, **kwargs):
+            raise RuntimeError(_SECRET_MARKER)
+
+    class FakeAio:
+        def __init__(self):
+            self.models = FakeModels()
+
+    # Same read-only-property workaround as above.
+    monkeypatch.setattr(client, "_client", SimpleNamespace(aio=FakeAio()))
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert len(events) == 1
+    assert events[0].type == "error"
+    assert _SECRET_MARKER not in events[0].error
+
+
+def test_get_llm_client_returns_gemini_client_when_provider_is_gemini(monkeypatch):
+    from app.core.llm_providers import GeminiClient, get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    # Explicitly empty rather than left to whatever backend/.env carries in
+    # this environment -- otherwise a real GROQ_API_KEY in the local dotenv
+    # file would make this construct a DualProviderClient instead of the
+    # bare GeminiClient this test is actually about (see the dedicated
+    # DualProviderClient-wrapping tests below for that case).
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    get_settings.cache_clear()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, GeminiClient)
+    finally:
+        get_settings.cache_clear()
+
+
+def test_get_llm_client_falls_back_to_configured_secondary_provider(monkeypatch):
+    # If the configured provider's key is missing/invalid but another
+    # provider is configured, get_llm_client() must fall back to it instead
+    # of raising -- this is the resolution-time fallback added to fix the
+    # "no fallback when the configured provider is unusable" audit finding.
+    from app.core.llm_providers import AnthropicClient, get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    # Settings reads *_API_KEY from backend/.env (which carries real keys in
+    # this environment) whenever the environment variable itself is unset --
+    # pydantic-settings falls back to the dotenv file, so plain delenv
+    # wouldn't actually clear it. Setting the env var to an empty string
+    # overrides the dotenv value (env vars rank above dotenv in
+    # pydantic-settings' source priority) while still being falsy.
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-fallback-key")
+    get_settings.cache_clear()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, AnthropicClient)
+    finally:
+        get_settings.cache_clear()
+
+
+def test_get_llm_client_prefers_configured_provider_over_fallback(monkeypatch):
+    # When the configured provider *does* have a usable key, it must win
+    # even though other providers are also configured -- fallback is only
+    # for when the configured provider is unusable.
+    from app.core.llm_providers import OpenAIClient, get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    get_settings.cache_clear()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, OpenAIClient)
+    finally:
+        get_settings.cache_clear()
+
+
+def test_get_llm_client_raises_when_no_provider_configured(monkeypatch):
+    # Only when literally none of the four providers have a key set should
+    # get_llm_client() raise.
+    from app.core.llm_providers import get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(RuntimeError):
+            get_llm_client()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_get_llm_client_returns_fake_client_when_provider_is_fake(monkeypatch):
+    from app.core.llm import FakeLLMClient
+    from app.core.llm_providers import get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    get_settings.cache_clear()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, FakeLLMClient)
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_openai_client_sanitizes_provider_exception():
+    client = OpenAIClient(api_key="test-key", model="test-model")
+
+    async def _raise(*args, **kwargs):
+        raise RuntimeError(_SECRET_MARKER)
+
+    client._client.chat.completions.create = _raise
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert len(events) == 1
+    assert events[0].type == "error"
+    assert events[0].error is not None
+    assert _SECRET_MARKER not in events[0].error
+
+
+def test_think_tag_filter_strips_a_complete_block_in_one_chunk():
+    # "Hello!" is only 6 chars -- shorter than "<think>"'s own boundary-safety
+    # buffer (up to 6 trailing chars can legitimately be held back until the
+    # next feed()/flush(), since it might still turn out to be the start of
+    # another marker) -- so this really does require flush() to see it all,
+    # exactly like a real stream's final chunk does.
+    f = _ThinkTagFilter()
+    result = f.feed("<think>internal reasoning</think>Hello!") + f.flush()
+    assert result == "Hello!"
+
+
+def test_think_tag_filter_strips_a_block_split_across_many_small_chunks():
+    # Mirrors how a real token stream actually arrives -- a few characters
+    # at a time, with the "<think>"/"</think>" markers themselves split
+    # across chunk boundaries in the worst case.
+    f = _ThinkTagFilter()
+    chunks = ["<th", "ink>", "the user said thanks", "</th", "ink>", "You're", " welcome!"]
+    out = "".join(f.feed(c) for c in chunks) + f.flush()
+    assert out == "You're welcome!"
+
+
+def test_think_tag_filter_passes_through_plain_text_with_no_think_tags():
+    # The common case (every provider/model except a reasoning-style one) --
+    # must be a true no-op, not just "eventually correct after buffering".
+    f = _ThinkTagFilter()
+    chunks = ["Hello", ", ", "world", "!"]
+    out = "".join(f.feed(c) for c in chunks) + f.flush()
+    assert out == "Hello, world!"
+
+
+def test_think_tag_filter_drops_an_unclosed_trailing_think_block():
+    # A truncated stream that ends mid-reasoning (no closing tag) should
+    # drop the dangling reasoning text rather than leak a half-formed trace.
+    f = _ThinkTagFilter()
+    f.feed("Sure -- ")
+    f.feed("<think>still reasoning when the stream cut off")
+    assert f.flush() == ""
+
+
+@pytest.mark.asyncio
+async def test_openai_client_strips_think_tags_split_across_stream_chunks():
+    # Regression test for the live-confirmed bug: openai/gpt-oss-20b (see
+    # config.py's groq_model) streams its chain-of-thought as literal
+    # "<think>...</think>" text inline with its real answer. Split across
+    # several chunks here, matching how a real token-by-token stream arrives.
+    client = OpenAIClient(api_key="test-key", model="test-model")
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        for piece in ["<think>", "the user said thanks", "</think>", "You're welcome", "!"]:
+            yield FakeChunk(piece)
+
+    async def fake_create(*args, **kwargs):
+        return fake_stream()
+
+    client._client.chat.completions.create = fake_create
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="thanks")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    token_text = "".join(e.token for e in events if e.type == "token")
+    assert token_text == "You're welcome!"
+    assert "<think>" not in token_text
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "You're welcome!"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_retries_stream_connect_and_succeeds(monkeypatch):
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    # Shrink the real backoff delays so this test doesn't add real wall-clock
+    # time -- the retry *logic* is what's under test, not the actual delay.
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(api_key="test-key", model="test-model")
+    attempts = {"n": 0}
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk("hi")
+
+    # Succeeds on the *last* allowed attempt specifically -- derived from
+    # the real constant rather than hardcoded, so this test still proves
+    # "retry logic eventually succeeds" regardless of exactly how many
+    # attempts _GROQ_MAX_ATTEMPTS currently allows.
+    async def flaky_create(*args, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] < llm_providers_module._GROQ_MAX_ATTEMPTS:
+            raise RuntimeError("transient connect failure")
+        return fake_stream()
+
+    client._client.chat.completions.create = flaky_create
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert attempts["n"] == llm_providers_module._GROQ_MAX_ATTEMPTS
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "hi"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_sanitizes_exception_after_exhausting_retries(monkeypatch):
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(api_key="test-key", model="test-model")
+    attempts = {"n": 0}
+
+    async def always_fails(*args, **kwargs):
+        attempts["n"] += 1
+        raise RuntimeError(_SECRET_MARKER)
+
+    client._client.chat.completions.create = always_fails
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert attempts["n"] == llm_providers_module._GROQ_MAX_ATTEMPTS
+    assert len(events) == 1
+    assert events[0].type == "error"
+    assert _SECRET_MARKER not in events[0].error
+
+
+@pytest.mark.asyncio
+async def test_groq_client_bounds_each_connect_attempt_by_its_own_timeout(monkeypatch):
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    # Shrink both the per-attempt timeout and the backoff so a hung connect
+    # attempt is proven bounded without the test itself taking ~15s+.
+    monkeypatch.setattr(llm_providers_module, "_GROQ_CONNECT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+    monkeypatch.setattr(llm_providers_module, "_GROQ_MAX_ATTEMPTS", 1)
+
+    client = GroqClient(api_key="test-key", model="test-model")
+
+    async def hangs_forever(*args, **kwargs):
+        await asyncio.sleep(10)
+
+    client._client.chat.completions.create = hangs_forever
+
+    start = asyncio.get_event_loop().time()
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+    elapsed = asyncio.get_event_loop().time() - start
+
+    assert elapsed < 5  # bounded by the 0.05s timeout, nowhere near the real 10s hang
+
+
+@pytest.mark.asyncio
+async def test_groq_client_switches_to_fallback_model_on_not_found(monkeypatch):
+    # Groq occasionally retires a model id outright (confirmed live against
+    # GET /openai/v1/models -- llama-3.3-70b-versatile and
+    # llama-3.1-8b-instant both 404 as of this deployment). Retrying the
+    # same retired model, even with backoff, can never succeed -- this
+    # proves the client detects a 404/NotFoundError specifically and
+    # switches to the configured fallback model instead of burning its
+    # whole retry budget on a model that will never come back.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    # A minimal stand-in for openai.NotFoundError: the client's detection
+    # falls back to matching on the exception's class name specifically so
+    # this test doesn't need to construct the real SDK exception (which
+    # requires real httpx request/response internals).
+    class NotFoundError(Exception):
+        status_code = 404
+
+    client = GroqClient(api_key="test-key", model="retired-model", fallback_model="working-model")
+    models_seen: list[str] = []
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk("hi")
+
+    async def create(*args, **kwargs):
+        models_seen.append(kwargs["model"])
+        if kwargs["model"] == "retired-model":
+            raise NotFoundError("model_not_found")
+        return fake_stream()
+
+    client._client.chat.completions.create = create
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert models_seen == ["retired-model", "working-model"]
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "hi"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_switches_to_fallback_model_on_rate_limit(monkeypatch):
+    # Groq's daily per-model token quota can be exhausted mid-session
+    # (confirmed live: "tokens per day (TPD): Limit 200000, Used 199399...
+    # try again in 27m58s") -- a 429/RateLimitError. Retrying the same model
+    # can't succeed until the quota resets, but the fallback model has its
+    # own separate quota, so the client should switch to it immediately
+    # instead of burning its retry budget against an exhausted model.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    class RateLimitError(Exception):
+        status_code = 429
+
+    client = GroqClient(api_key="test-key", model="quota-exhausted-model", fallback_model="working-model")
+    models_seen: list[str] = []
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk("hi")
+
+    async def create(*args, **kwargs):
+        models_seen.append(kwargs["model"])
+        if kwargs["model"] == "quota-exhausted-model":
+            raise RateLimitError("rate limit reached")
+        return fake_stream()
+
+    client._client.chat.completions.create = create
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert models_seen == ["quota-exhausted-model", "working-model"]
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "hi"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_switches_to_fallback_model_on_service_unavailable(monkeypatch):
+    # A 503 (openai.InternalServerError) means Groq's own model/endpoint is
+    # temporarily overloaded -- a property of that specific model's current
+    # capacity, not a transient network blip, so retrying the same model is
+    # no more likely to succeed than a 404/429. Same instant-switch
+    # behavior as those two cases.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    class ServiceUnavailableError(Exception):
+        status_code = 503
+
+    client = GroqClient(api_key="test-key", model="overloaded-model", fallback_model="working-model")
+    models_seen: list[str] = []
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk("hi")
+
+    async def create(*args, **kwargs):
+        models_seen.append(kwargs["model"])
+        if kwargs["model"] == "overloaded-model":
+            raise ServiceUnavailableError("service unavailable")
+        return fake_stream()
+
+    client._client.chat.completions.create = create
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert models_seen == ["overloaded-model", "working-model"]
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "hi"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_switches_to_fallback_model_on_bad_request(monkeypatch):
+    # A 400 (openai.BadRequestError) can be a model-specific validation
+    # failure (e.g. a context-length limit only this model hits) that a
+    # different model can genuinely resolve. Same instant-switch behavior
+    # as 404/429/503.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    class BadRequestError(Exception):
+        status_code = 400
+
+    client = GroqClient(api_key="test-key", model="rejecting-model", fallback_model="working-model")
+    models_seen: list[str] = []
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk("hi")
+
+    async def create(*args, **kwargs):
+        models_seen.append(kwargs["model"])
+        if kwargs["model"] == "rejecting-model":
+            raise BadRequestError("bad request")
+        return fake_stream()
+
+    client._client.chat.completions.create = create
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert models_seen == ["rejecting-model", "working-model"]
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "hi"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_does_not_switch_models_on_a_generic_transient_error(monkeypatch):
+    # A non-404 failure (rate limit, connection reset, etc.) is genuinely
+    # transient -- the configured model is fine, so retries must keep using
+    # it rather than prematurely abandoning it for the fallback.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(api_key="test-key", model="primary-model", fallback_model="fallback-model")
+    models_seen: list[str] = []
+
+    async def always_transient_failure(*args, **kwargs):
+        models_seen.append(kwargs["model"])
+        raise RuntimeError("connection reset")
+
+    client._client.chat.completions.create = always_transient_failure
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert models_seen == ["primary-model"] * llm_providers_module._GROQ_MAX_ATTEMPTS
+    assert events[-1].type == "error"
+    assert events[-1].type == "error"
+
+
+class _FakeStreamClient:
+    """Minimal stand-in for any *Client with a stream_chat(...) -- used to
+    test DualProviderClient generically, without needing to mock real
+    GeminiClient/GroqClient SDK internals for every scenario."""
+
+    def __init__(self, events):
+        self._events = events
+
+    async def stream_chat(self, messages, tools, system_prompt):
+        for event in self._events:
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_dual_provider_client_fails_over_to_secondary_when_primary_fails_before_any_content():
+    from app.core.llm_providers import DualProviderClient, LLMEvent
+
+    primary = _FakeStreamClient([LLMEvent(type="error", error="primary is down")])
+    secondary = _FakeStreamClient([
+        LLMEvent(type="token", token="hello "),
+        LLMEvent(type="token", token="from secondary"),
+        LLMEvent(type="message_done", message=Message(role="assistant", content="hello from secondary")),
+    ])
+    client = DualProviderClient(primary=primary, secondary=secondary, primary_name="Primary", secondary_name="Secondary")
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert not any(e.type == "error" for e in events)
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "hello from secondary"
+
+
+@pytest.mark.asyncio
+async def test_dual_provider_client_does_not_fail_over_once_content_already_streamed():
+    from app.core.llm_providers import DualProviderClient, LLMEvent, _PROVIDER_ERROR_MESSAGE
+
+    primary = _FakeStreamClient([
+        LLMEvent(type="token", token="partial answer"),
+        LLMEvent(type="error", error="connection dropped mid-stream"),
+    ])
+    secondary = _FakeStreamClient([LLMEvent(type="token", token="should never be reached")])
+    client = DualProviderClient(primary=primary, secondary=secondary, primary_name="Primary", secondary_name="Secondary")
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    token_events = [e for e in events if e.type == "token"]
+    assert len(token_events) == 1
+    assert token_events[0].token == "partial answer"
+    assert events[-1].type == "error"
+    assert events[-1].error == _PROVIDER_ERROR_MESSAGE
+
+
+def test_get_llm_client_wraps_gemini_and_groq_in_dual_provider_client_when_both_keys_set(monkeypatch):
+    from app.core.llm_providers import DualProviderClient, get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    get_settings.cache_clear()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, DualProviderClient)
+    finally:
+        get_settings.cache_clear()
+
+
+def test_get_llm_client_returns_bare_gemini_client_when_only_gemini_key_set(monkeypatch):
+    # Existing single-provider behavior must be unchanged when Groq isn't
+    # also configured -- DualProviderClient only kicks in with both keys.
+    from app.core.llm_providers import GeminiClient, get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    get_settings.cache_clear()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, GeminiClient)
+    finally:
+        get_settings.cache_clear()
+
+
+def test_get_llm_client_wraps_groq_and_gemini_when_groq_is_primary(monkeypatch):
+    # The reverse direction of the test above: production runs
+    # LLM_PROVIDER=groq (see render.yaml's comment on why Groq is Tier 1),
+    # so this is the actual shape get_llm_client() builds in production
+    # when both keys are configured -- Groq as primary, Gemini as its live
+    # Tier 2 failover, not the other way around.
+    from app.core.llm_providers import DualProviderClient, GroqClient, get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    get_settings.cache_clear()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, DualProviderClient)
+        assert isinstance(client._primary, GroqClient)
+        assert client._primary_name == "Groq"
+        assert client._secondary_name == "Gemini"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_get_llm_client_returns_bare_groq_client_when_only_groq_key_set(monkeypatch):
+    # Mirrors test_get_llm_client_returns_bare_gemini_client_when_only_gemini_key_set
+    # for the Groq-primary direction -- no Gemini key means no wrapping.
+    from app.core.llm_providers import GroqClient, get_llm_client
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    get_settings.cache_clear()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, GroqClient)
+    finally:
+        get_settings.cache_clear()
+
+
+def _patch_fake_ollama(monkeypatch, response_text: str | None = None, should_fail: bool = False):
+    """Patches llm_providers.AsyncOpenAI so any client constructed while
+    this is active (i.e. the OllamaClient GroqClient builds internally) gets
+    a fake completions.create instead of making a real network call."""
+    import app.core.llm_providers as llm_providers_module
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk(response_text or "")
+
+    class FakeCompletions:
+        async def create(self, *args, **kwargs):
+            if should_fail:
+                raise RuntimeError("ollama connection refused")
+            return fake_stream()
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeAsyncOpenAI:
+        def __init__(self, *args, **kwargs):
+            self.chat = FakeChat()
+
+    monkeypatch.setattr(llm_providers_module, "AsyncOpenAI", FakeAsyncOpenAI)
+
+
+@pytest.mark.asyncio
+async def test_groq_client_fails_over_to_local_ollama_when_cloud_fails_before_any_content(monkeypatch):
+    # The core ask this fallback exists for: Groq exhausted (rate limit,
+    # outage, whatever) before a single token reached the caller -- a local
+    # Ollama server should transparently take over rather than surfacing
+    # "The AI provider is currently unavailable."
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(
+        api_key="test-key", model="primary-model", fallback_model=None,
+        local_fallback_model="qwen2.5-coder:7b", local_fallback_base_url="http://fake-ollama/v1",
+    )
+
+    async def groq_always_fails(*args, **kwargs):
+        raise RuntimeError("groq is down")
+
+    client._client.chat.completions.create = groq_always_fails
+    _patch_fake_ollama(monkeypatch, response_text="hello from ollama")
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert not any(e.type == "error" for e in events)
+    assert events[-1].type == "message_done"
+    assert events[-1].message.content == "hello from ollama"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_does_not_fail_over_once_content_already_streamed(monkeypatch):
+    # Mirrors the existing never-retry-mid-stream rule: once real tokens
+    # already reached the caller, switching providers now would risk a
+    # duplicated or inconsistent answer -- must surface the plain error
+    # instead of silently starting over on Ollama.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(
+        api_key="test-key", model="primary-model", fallback_model=None,
+        local_fallback_model="qwen2.5-coder:7b", local_fallback_base_url="http://fake-ollama/v1",
+    )
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def dies_midway():
+        yield FakeChunk("partial ")
+        raise RuntimeError("connection dropped mid-stream")
+
+    async def groq_create(*args, **kwargs):
+        return dies_midway()
+
+    client._client.chat.completions.create = groq_create
+    # Left un-patched deliberately: if the fallback path were mistakenly
+    # taken here, OllamaClient would attempt a real network call and this
+    # test would hang/error very differently than the assertion below.
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    # _ThinkTagFilter's boundary-safety buffering (see llm_providers.py) can
+    # legitimately split "partial " into more than one token event -- the
+    # tail end may only surface once flush()'d on the error path below,
+    # rather than in the same event as everything before it. What matters
+    # here is that no content is silently dropped, not the exact chunking.
+    token_events = [e for e in events if e.type == "token"]
+    assert token_events
+    assert "".join(e.token for e in token_events) == "partial "
+    assert events[-1].type == "error"
+    assert events[-1].error == llm_providers_module._PROVIDER_ERROR_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_groq_client_surfaces_plain_error_when_no_local_fallback_configured(monkeypatch):
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(api_key="test-key", model="primary-model", fallback_model=None, local_fallback_model=None)
+
+    async def groq_always_fails(*args, **kwargs):
+        raise RuntimeError("groq is down")
+
+    client._client.chat.completions.create = groq_always_fails
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert events[-1].type == "error"
+    assert events[-1].error == llm_providers_module._PROVIDER_ERROR_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_groq_client_surfaces_local_fallback_unavailable_message_when_both_fail(monkeypatch):
+    # Neither the cloud provider nor the local Ollama fallback are reachable
+    # (e.g. Ollama isn't running) -- the user should see an honest, specific
+    # message rather than the generic cloud-only error text.
+    import app.core.llm_providers as llm_providers_module
+    from app.core.llm_providers import GroqClient
+
+    monkeypatch.setattr(llm_providers_module, "_GROQ_BACKOFF_BASE_SECONDS", 0.001)
+
+    client = GroqClient(
+        api_key="test-key", model="primary-model", fallback_model=None,
+        local_fallback_model="qwen2.5-coder:7b", local_fallback_base_url="http://fake-ollama/v1",
+    )
+
+    async def groq_always_fails(*args, **kwargs):
+        raise RuntimeError("groq is down")
+
+    client._client.chat.completions.create = groq_always_fails
+    _patch_fake_ollama(monkeypatch, should_fail=True)
+
+    events = [
+        event
+        async for event in client.stream_chat(
+            messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"
+        )
+    ]
+
+    assert events[-1].type == "error"
+    assert events[-1].error == llm_providers_module._LOCAL_FALLBACK_UNAVAILABLE_MESSAGE

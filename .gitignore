@@ -1,0 +1,12 @@
+.worktrees/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+backend/keys/*.pem
+backend/.env
+.env
+.coverage
+htmlcov/
+*.egg-info/

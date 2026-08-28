@@ -1,0 +1,192 @@
+# Render Blueprint for the RepoLens AI backend -- 100%-free-tier setup.
+#
+# A single free Render web service runs BOTH the FastAPI API and the ARQ
+# background worker -- in the same Python process (see Settings.
+# run_worker_in_process and app/main.py's lifespan), not just the same
+# container -- because Render has no free tier for standalone worker
+# services at all, and confirmed live that even two separate OS processes
+# in one container OOM'd a 512MB instance (each imports its own copy of
+# torch/transformers/langchain/langgraph regardless of whether it loads
+# any model weights). Postgres (with pgvector) and Redis are NOT
+# provisioned here either -- Render's own free Postgres is deleted 30 days
+# after creation, which defeats "permanent."
+# Use an external always-free provider instead:
+#   - Postgres: neon.tech or supabase.com (both have a real free tier with
+#     pgvector support, no expiration).
+#   - Redis: upstash.com (real free tier, TLS `rediss://` URL).
+# Paste their connection strings into DATABASE_URL / REDIS_URL below when
+# Render prompts for them -- see README.md's deployment checklist for the
+# exact steps (enabling pgvector, where to find each connection string).
+#
+# Any envVar marked `sync: false` is a secret Render will prompt you to
+# fill in yourself when applying this blueprint -- nothing sensitive lives
+# in this file.
+#
+# Tradeoffs worth knowing, both confirmed live against a real free
+# instance, neither hidden by the scripts that work around them:
+# - Repo analysis's embedding step (search_code's vector index) is
+#   disabled outright here (ENABLE_EMBEDDING=false) -- loading the real
+#   ~500MB CodeBERT model exceeds 512MB even with every other memory
+#   optimization in place. Analysis still completes fully (files, domain
+#   briefing), and chat still works well via list_directory/read_file --
+#   just without similarity search. Flip this back to true (and drop
+#   RUN_WORKER_IN_PROCESS) on a plan with enough RAM to load the model.
+# - The free web plan spins down after 15min idle (~1min cold start on
+#   the next request).
+
+services:
+  - type: web
+    name: repo-analyzer
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: ./scripts/start_unified.sh
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # External managed Postgres (Neon/Supabase) -- paste its connection
+      # string as-is. Settings.database_url upgrades a plain "postgresql://"
+      # to "postgresql+asyncpg://" automatically, and db/session.py strips
+      # the sslmode/channel_binding query params Neon/Supabase include by
+      # default (asyncpg wants TLS expressed differently -- both files
+      # explain why in their own comments), so no manual editing is needed.
+      - key: DATABASE_URL
+        sync: false
+      # External Upstash Redis -- paste its `rediss://` connection string
+      # as-is. Both consumers (arq's RedisSettings.from_dsn and redis-py's
+      # Redis.from_url, see app/workers/settings.py and
+      # app/core/rate_limit.py) recognize the "rediss://" scheme and enable
+      # TLS automatically -- no extra config needed.
+      - key: REDIS_URL
+        sync: false
+      # RS256 keypair -- generate locally with
+      # `python backend/scripts/generate_keys.py`, then paste each .pem
+      # file's content (or its base64 -- app/core/security.py's _load_pem
+      # accepts either) directly as these two values. Inline env vars
+      # rather than Render Secret Files specifically so the whole blueprint
+      # can be filled in via plain env vars (API/CLI-settable) with no
+      # dashboard file-upload step.
+      - key: JWT_PRIVATE_KEY
+        sync: false
+      - key: JWT_PUBLIC_KEY
+        sync: false
+      - key: JWT_ALGORITHM
+        value: RS256
+      - key: JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "60"
+      # Groq is Tier 1, Gemini is Tier 2: with both GROQ_API_KEY and
+      # GEMINI_API_KEY set, get_llm_client() wraps them in a
+      # DualProviderClient (see app/core/llm_providers.py) -- a Groq
+      # failure (both its own primary and fallback model exhausted)
+      # transparently retries the same request against Gemini instead of
+      # surfacing the raw error. chat.py's deterministic keyword fallback
+      # remains the last resort if both cloud providers are down.
+      #
+      # Groq is primary rather than Gemini specifically because of each
+      # provider's *free-tier* rate-limit shape for this deployment's keys,
+      # confirmed live on 2026-08-24: Groq's free tier is a shared ~200k
+      # *tokens*/day budget across many requests -- generous under normal
+      # chat traffic. Gemini's free tier for this key/project is capped at
+      # a hard 20 *requests*/day for gemini-3.6-flash specifically ("Quota
+      # exceeded for metric: generate_content_free_tier_requests, limit:
+      # 20" -- a real 429 RESOURCE_EXHAUSTED response, not a guess) --
+      # exhausted almost immediately under any real usage, let alone
+      # testing volume. Gemini still adds real value as Tier 2 (a second
+      # independent provider to fail over to before ever reaching the
+      # deterministic fallback), just not as the higher-traffic primary.
+      - key: LLM_PROVIDER
+        value: groq
+      # See app/config.py's gemini_model comment: gemini-3.7-flash and
+      # gemini-2.5-flash were both live-verified unusable for this account
+      # (overloaded / blocked-for-new-accounts respectively) -- 3.6-flash is
+      # the one that actually works.
+      - key: GEMINI_MODEL
+        value: gemini-3.6-flash
+      - key: GROQ_API_KEY
+        sync: false
+      # Re-verified live against the real Groq /models endpoint on
+      # 2026-08-23 -- Llama 3.x model ids (e.g. llama-3.3-70b-versatile,
+      # llama-3.1-8b-instant) are still retired on Groq's current catalog
+      # and will 404 if substituted here. openai/gpt-oss-20b is the primary
+      # for chat latency (smaller model, faster first-token/tok-per-sec on
+      # Groq's hardware; see backend/app/config.py's groq_model comment for
+      # the full tradeoff writeup). qwen/qwen3.6-27b is the fallback --
+      # GroqClient auto-switches to it on a 404/429 from the primary (see
+      # app/core/llm_providers.py).
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-20b
+      - key: GROQ_FALLBACK_MODEL
+        value: qwen/qwen3.6-27b
+      # No local Ollama server is reachable from Render -- leave empty so
+      # a cloud-provider failure surfaces its real error immediately
+      # instead of wasting time on a doomed local-fallback connection
+      # attempt. Set this only if OLLAMA_BASE_URL below points at a real,
+      # internet-reachable Ollama instance you run yourself.
+      - key: OLLAMA_MODEL
+        value: ""
+      - key: OLLAMA_BASE_URL
+        value: ""
+      # GEMINI_API_KEY (Tier 1, paired with GROQ_API_KEY above as Tier 2 --
+      # see the LLM_PROVIDER comment near the top of this section) is the
+      # one of these three actually used by default. ANTHROPIC_API_KEY and
+      # OPENAI_API_KEY are optional extras -- get_llm_client() only reaches
+      # them if LLM_PROVIDER is changed to "anthropic"/"openai" and/or
+      # GEMINI_API_KEY is unset.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      # Feedback submissions (POST /api/v1/feedback) email themselves via
+      # Resend's HTTP API. RESEND_API_KEY is the only piece that actually
+      # needs setting here -- Settings.feedback_recipient_email already
+      # defaults to a real inbox, so this entry only needs a value if you
+      # want feedback routed somewhere else. A submission is still
+      # accepted (202) and logged server-side if RESEND_API_KEY is
+      # missing, see core/feedback_email.py. Get a free RESEND_API_KEY at
+      # resend.com; no domain verification needed since
+      # feedback_sender_email defaults to Resend's own shared sandbox
+      # sender.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: FEEDBACK_RECIPIENT_EMAIL
+        sync: false
+      # Empty unless something calls this API straight from a browser --
+      # the bundled Next.js frontend proxies every call server-side and
+      # never needs this. Set to your Vercel frontend's URL(s) (comma-
+      # separated) or "*" only if you add a direct-from-browser caller.
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: MAX_REPO_SIZE_MB
+        value: "500"
+      - key: MAX_FILES_PER_REPO
+        value: "5000"
+      - key: RATE_LIMIT_ANALYZE_PER_MINUTE
+        value: "5"
+      - key: RATE_LIMIT_CHAT_PER_MINUTE
+        value: "15"
+      # Confirmed live: with this unset (both processes eagerly loading
+      # their own ~500MB CodeBERT copy at startup), this exact deployment
+      # OOM'd ("Out of memory (used over 512Mi)") before ever accepting a
+      # request. false here means the model loads lazily on first actual
+      # use instead -- see Settings.warm_embedding_model_on_startup.
+      - key: WARM_EMBEDDING_MODEL_ON_STARTUP
+        value: "false"
+      # Confirmed live: even with the above set, two separate OS processes
+      # (api + a standalone `arq` process) still OOM'd -- each imports its
+      # own copy of torch/transformers/langchain/langgraph regardless of
+      # model weights. true runs the worker loop inside this process's own
+      # event loop instead (see Settings.run_worker_in_process), so only
+      # one copy of each library is ever imported.
+      - key: RUN_WORKER_IN_PROCESS
+        value: "true"
+      # Confirmed live: even with both settings above, an analyze job was
+      # silently killed mid-embedding -- loading the real ~500MB CodeBERT
+      # model itself (not just importing torch/transformers) is what
+      # actually exceeds 512MB. false skips the embedding step entirely
+      # (analysis still completes -- files, briefing, chat's
+      # list_directory/read_file tools all work) and excludes chat's now-
+      # useless search_code tool -- see Settings.enable_embedding.
+      - key: ENABLE_EMBEDDING
+        value: "false"

@@ -1,0 +1,124 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: repo-analyzer-postgres
+    environment:
+      POSTGRES_USER: repoanalyzer
+      POSTGRES_PASSWORD: repoanalyzer
+      POSTGRES_DB: repoanalyzer
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U repoanalyzer -d repoanalyzer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: repo-analyzer-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+    container_name: repo-analyzer-api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://repoanalyzer:repoanalyzer@postgres:5432/repoanalyzer
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_PRIVATE_KEY_PATH: keys/jwt_private.pem
+      JWT_PUBLIC_KEY_PATH: keys/jwt_public.pem
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.6-27b}
+      GROQ_FALLBACK_MODEL: ${GROQ_FALLBACK_MODEL:-openai/gpt-oss-20b}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/keys:/app/keys
+    # Lets this container reach a local Ollama server on the host machine
+    # via "host.docker.internal" (see GroqClient's local fallback in
+    # app/core/llm_providers.py) -- Docker Desktop (Windows/Mac) wires this
+    # up automatically, but plain Docker Engine on Linux needs it declared
+    # explicitly.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+    container_name: repo-analyzer-worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://repoanalyzer:repoanalyzer@postgres:5432/repoanalyzer
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_PRIVATE_KEY_PATH: keys/jwt_private.pem
+      JWT_PUBLIC_KEY_PATH: keys/jwt_public.pem
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.6-27b}
+      GROQ_FALLBACK_MODEL: ${GROQ_FALLBACK_MODEL:-openai/gpt-oss-20b}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
+    # Hard backstop on top of embedding_cpu_threads (app/config.py): even if
+    # a future change forgets to respect that setting, the container itself
+    # is capped so bulk embedding can no longer consume every host core and
+    # starve the api container sharing the same Docker Desktop VM. Leaves
+    # the rest of the stack (postgres/redis/api/frontend) real headroom.
+    cpus: "6"
+    # Lets this container reach a server on the host machine via
+    # "host.docker.internal" -- Docker Desktop (Windows/Mac) wires this up
+    # automatically, but plain Docker Engine on Linux needs it declared
+    # explicitly. Used by the Playwright e2e suite's local fixture-repo git
+    # server (frontend/tests/e2e/fixture-git-server.ts, see frontend/README.md)
+    # so `analyze_repo`'s clone doesn't depend on github.com being reachable.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["arq", "app.workers.settings.WorkerSettings"]
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: repo-analyzer-frontend
+    environment:
+      BACKEND_URL: http://api:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  postgres_data:

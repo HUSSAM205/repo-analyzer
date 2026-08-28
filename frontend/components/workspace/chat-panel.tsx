@@ -1,0 +1,481 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { motion } from "framer-motion";
+import { ArrowDown, Search } from "lucide-react";
+import { ConversationPicker } from "./conversation-picker";
+import { ChatMessage } from "./chat-message";
+import { ChatInput } from "./chat-input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
+import { parseSSEChunk } from "@/lib/sse";
+import { apiFetch } from "@/lib/api-client";
+import type { ChatMessage as ChatMessageType, Conversation } from "@/lib/types";
+
+// Shown as a persistent row above the chat input (not just on an empty
+// conversation) -- these are deliberately broad, "always a reasonable next
+// question" starters for exploring an unfamiliar repo, rather than
+// generated per-repo (which would cost an extra LLM call on every page
+// load for a suggestion the user might never click).
+const QUICK_PROMPTS = [
+  { emoji: "🧭", label: "Where is the entry point?" },
+  { emoji: "🔐", label: "Explain auth/data flow" },
+  { emoji: "💡", label: "How to add a new feature?" },
+];
+
+// Keyed by the "tool" field the backend now includes on every tool_call SSE
+// event (app/api/routes/chat.py) -- the assistant has three tools, not just
+// search, so a status text hardcoded to "Searching code..." was actively
+// misleading while it was browsing structure or reading a file in full.
+const TOOL_STATUS_TEXT: Record<string, string> = {
+  search_code: "🧠 Parsing abstract syntax tree...",
+  list_directory: "🔍 Scanning repository...",
+  read_file: "📖 Reading source file...",
+};
+
+// Shown for the gap between a tool finishing and the first answer token
+// arriving -- otherwise that gap renders as a blank status (no visible
+// activity) even though the model is actively generating.
+const CRAFTING_RESPONSE_TEXT = "⚡ Crafting response...";
+
+// A failure before any stream content has been received means the request
+// never reached working chat logic server-side (network drop, or a fast
+// non-2xx like a transient 502/503 while the backend is briefly overloaded
+// -- e.g. during a heavy background repo analysis) -- so it's always safe
+// to retry automatically: nothing could have been generated/persisted yet.
+// Once even one SSE event has been read, a retry is no longer attempted
+// automatically (that's what the existing manual Retry button is for) --
+// re-sending at that point risks duplicating a turn the backend already
+// started.
+const MAX_SEND_ATTEMPTS = 2;
+const AUTO_RETRY_DELAY_MS = 1500;
+type SendOutcome = "success" | "retry" | "failed";
+
+export function ChatPanel({
+  repoId,
+  onCitationClick,
+}: {
+  repoId: string;
+  onCitationClick?: (path: string) => void;
+}) {
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ChatMessageType[]>([]);
+  const [streamingText, setStreamingText] = useState("");
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [statusText, setStatusText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [failedMessage, setFailedMessage] = useState<string | null>(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+
+  const scrollViewportRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  function scrollToBottom(behavior: ScrollBehavior) {
+    bottomRef.current?.scrollIntoView({ behavior });
+  }
+
+  // Auto-follow should turn off only when the user actually scrolls away
+  // themselves -- never as a side effect of the app's own scroll-to-bottom
+  // calls (the auto-follow effect below, and the "jump to bottom" button).
+  // A native "scroll" event can't distinguish the two: it fires identically
+  // whether scrollTop changed because of a user's wheel/touch gesture or
+  // because `scrollIntoView` moved it programmatically, including at every
+  // intermediate frame of a "smooth" scroll's animation. An earlier version
+  // of this guarded against that with a timing heuristic (a ref flag armed
+  // before each programmatic scroll, cleared a fixed delay afterward) --
+  // but real streaming chunks arrive faster than that delay, so the guard
+  // stayed continuously re-armed for the whole duration of a live stream
+  // and a genuine user scroll-up got ignored until the stream paused.
+  //
+  // Fixed properly here: only ever evaluate "has the user scrolled away
+  // from the bottom" from listeners on genuine user-input event types --
+  // "wheel" (mouse/trackpad) and "touchstart"/"touchmove" (touch drag).
+  // `scrollIntoView` never dispatches any of these, so there is no event
+  // for a programmatic scroll to be mistaken for, at any point in its
+  // animation, with no timing window to guess at. The generic "scroll"
+  // event is not listened to at all for this purpose.
+  useEffect(() => {
+    const el = scrollViewportRef.current;
+    if (!el) return;
+
+    function evaluateUserScrollPosition() {
+      if (!el) return;
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      setAutoScroll(distanceFromBottom < 80);
+    }
+
+    el.addEventListener("wheel", evaluateUserScrollPosition, { passive: true });
+    el.addEventListener("touchstart", evaluateUserScrollPosition, { passive: true });
+    el.addEventListener("touchmove", evaluateUserScrollPosition, { passive: true });
+    return () => {
+      el.removeEventListener("wheel", evaluateUserScrollPosition);
+      el.removeEventListener("touchstart", evaluateUserScrollPosition);
+      el.removeEventListener("touchmove", evaluateUserScrollPosition);
+    };
+  }, []);
+
+  async function refetchMessages(conversationId: string) {
+    const res = await apiFetch(`/api/conversations/${conversationId}/messages`, { cache: "no-store" });
+    if (res.ok) {
+      setMessages((await res.json()) as ChatMessageType[]);
+    }
+  }
+
+  // The backend derives a real conversation title from a conversation's
+  // first message (see chat.py's _derive_title), set server-side
+  // regardless of whether that turn's reply then succeeds or errors -- but
+  // `conversations` here was already fetched before that happened, so the
+  // picker would keep showing the stale "New conversation" placeholder
+  // until this refetches it. Called after every completed turn rather than
+  // only on an actual "first message" (a client-side "is this the first
+  // message" check based on `messages.length` would race switching to a
+  // brand new conversation and sending a message before that
+  // conversation's own empty message list has finished loading) --
+  // idempotent and cheap on every other turn, since the backend only ever
+  // renames a conversation away from its default title once. Best-effort:
+  // a failure here just means the picker's title stays stale until the
+  // next natural refetch (e.g. switching repos), not something worth
+  // surfacing as an error to the user.
+  async function refetchConversationTitles() {
+    const res = await apiFetch(`/api/repos/${repoId}/conversations`, { cache: "no-store" });
+    if (res.ok) {
+      setConversations((await res.json()) as Conversation[]);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch(`/api/repos/${repoId}/conversations`, { cache: "no-store" })
+      .then((res) => {
+        if (!res.ok) throw new Error("Failed to load conversations");
+        return res.json() as Promise<Conversation[]>;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        setConversations(data);
+        if (data.length > 0) setActiveId(data[0].id);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Could not load conversations. Please refresh the page.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repoId]);
+
+  useEffect(() => {
+    if (!activeId) {
+      setMessages([]);
+      return;
+    }
+    refetchMessages(activeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
+
+  useEffect(() => {
+    if (autoScroll) {
+      scrollToBottom("smooth");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, streamingText, autoScroll]);
+
+  async function handleCreate() {
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/repos/${repoId}/conversations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "New conversation" }),
+      });
+      if (!res.ok) {
+        setError("Could not start a new conversation. Please try again.");
+        return;
+      }
+      const conversation = (await res.json()) as Conversation;
+      setConversations((prev) => [conversation, ...prev]);
+      setActiveId(conversation.id);
+    } catch {
+      setError("Could not start a new conversation. Please try again.");
+    }
+  }
+
+  // One attempt at sending `content`. Returns "retry" only for a failure
+  // that happened before any SSE event was read (see MAX_SEND_ATTEMPTS'
+  // comment) -- every other outcome (success, or a failure once streaming
+  // had already started) is terminal and sets the persistent error UI
+  // itself so the caller doesn't need to.
+  async function attemptSend(content: string): Promise<SendOutcome> {
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    let res: Response;
+    try {
+      res = await apiFetch(`/api/conversations/${activeId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+        signal: controller.signal,
+      });
+    } catch {
+      return "retry"; // thrown before any response was received -- nothing sent yet
+    }
+
+    if (!res.ok || !res.body) {
+      return "retry"; // e.g. a transient 502/503 -- the chat turn never started server-side
+    }
+
+    // From here on the request has been accepted; no more automatic
+    // retries past this point, only the persistent error UI + manual Retry.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalText = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const { events, remainder } = parseSSEChunk(buffer);
+        buffer = remainder;
+
+        for (const event of events) {
+          if (event.type === "token") {
+            const text = (event.data as { text?: string }).text ?? "";
+            finalText += text;
+            setStreamingText((prev) => prev + text);
+            // The first token of the answer is the clearest possible
+            // signal that generation has genuinely started -- clear
+            // whatever status was showing (including "Crafting
+            // response...") the moment real output begins.
+            setStatusText(null);
+          } else if (event.type === "tool_call") {
+            const tool = (event.data as { tool?: string }).tool;
+            setStatusText(TOOL_STATUS_TEXT[tool ?? ""] ?? "Working...");
+          } else if (event.type === "tool_result") {
+            // Between a tool finishing and the next token arriving, the
+            // model is still actively working (deciding on another tool
+            // call, or generating the final answer) -- show that instead
+            // of a blank gap with no visible activity.
+            setStatusText(CRAFTING_RESPONSE_TEXT);
+          } else if (event.type === "done") {
+            if (finalText.trim()) {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: (event.data as { message_id: string }).message_id,
+                  role: "assistant",
+                  content: finalText,
+                  created_at: new Date().toISOString(),
+                },
+              ]);
+            } else {
+              // The agent's give-up path (max tool-call iterations with no
+              // textual answer, see backend/app/core/agent.py) emits "done"
+              // with no preceding "token" events at all -- finalText is
+              // empty here even though the backend persisted real
+              // explanatory text for this turn. The "done" payload only
+              // carries {message_id}, not the text itself, so it can't be
+              // recovered from the stream. Refetch the conversation's
+              // message list instead, which reflects whatever was actually
+              // persisted, rather than rendering a blank assistant bubble.
+              await refetchMessages(activeId!);
+            }
+            refetchConversationTitles();
+            setStreamingText("");
+            setStatusText(null);
+          } else if (event.type === "error") {
+            // Clear the in-progress bubble -- it was never saved as a real
+            // message (finalText is discarded on this path), so leaving it
+            // on screen next to the error banner reads as a dangling,
+            // half-finished answer with no indication anything went wrong.
+            setStreamingText("");
+            setError((event.data as { message?: string }).message ?? "The assistant hit an error.");
+            setFailedMessage(content);
+            setStatusText(null);
+            // The backend derives the conversation's title from the first
+            // message right after persisting it -- before it ever attempts
+            // the LLM call (see chat.py's send_message) -- so the title is
+            // already set server-side even though this turn's reply failed.
+            refetchConversationTitles();
+            return "failed";
+          }
+        }
+      }
+      return "success";
+    } catch {
+      if (controller.signal.aborted) {
+        // User-initiated Stop (handleStop below), not a real failure -- the
+        // backend never reaches message_done on this path (its SSE
+        // generator is torn down by CancelledError once the connection
+        // drops, see chat.py), so nothing was persisted server-side.
+        // Keeping the partial text as a real bubble here (rather than
+        // discarding it like the error path does) is what actually stopped
+        // generation looks like to the user; it just won't survive a
+        // refresh, same as it wouldn't for a network drop at this exact
+        // point.
+        if (finalText.trim()) {
+          setMessages((prev) => [
+            ...prev,
+            { id: `stopped-${Date.now()}`, role: "assistant", content: finalText, created_at: new Date().toISOString() },
+          ]);
+        }
+        setStreamingText("");
+        setStatusText(null);
+        return "success";
+      }
+      setStreamingText("");
+      setError("Connection lost while streaming the response.");
+      setFailedMessage(content);
+      setStatusText(null);
+      return "failed";
+    }
+  }
+
+  async function handleSend(content: string) {
+    if (!activeId) return;
+    setError(null);
+    setFailedMessage(null);
+    setMessages((prev) => [
+      ...prev,
+      { id: `local-${Date.now()}`, role: "user", content, created_at: new Date().toISOString() },
+    ]);
+    setIsStreaming(true);
+    setStreamingText("");
+    setStatusText(null);
+    setAutoScroll(true);
+
+    for (let attempt = 1; attempt <= MAX_SEND_ATTEMPTS; attempt++) {
+      const outcome = await attemptSend(content);
+      if (outcome !== "retry") {
+        break; // "success" or "failed" -- attemptSend already set any error UI needed
+      }
+      if (attempt < MAX_SEND_ATTEMPTS) {
+        setStatusText("Connection issue -- retrying...");
+        await new Promise((resolve) => setTimeout(resolve, AUTO_RETRY_DELAY_MS));
+        setStatusText(null);
+      } else {
+        setError("Could not send that message. Please try again.");
+        setFailedMessage(content);
+      }
+    }
+
+    setIsStreaming(false);
+  }
+
+  function handleRetry() {
+    if (!failedMessage) return;
+    handleSend(failedMessage);
+  }
+
+  function handleStop() {
+    abortControllerRef.current?.abort();
+  }
+
+  return (
+    // `min-w-0` here (and on the ScrollArea's message list below) matters
+    // because this panel sits in a flex row (see workspace-shell.tsx) --
+    // without it, a flex child's default `min-width: auto` lets its content
+    // (e.g. a long unbroken citation/URL inside a message, before the
+    // `break-words` fix in chat-message.tsx) force the child wider than its
+    // allotted pane width instead of wrapping, pushing the whole panel into
+    // horizontal scroll.
+    <div className="flex h-full min-w-0 flex-col">
+      <ConversationPicker
+        conversations={conversations}
+        activeId={activeId}
+        onSelect={setActiveId}
+        onCreate={handleCreate}
+      />
+      <div className="relative min-h-0 min-w-0 flex-1">
+        <ScrollArea className="h-full p-3" viewportRef={scrollViewportRef}>
+          <div className="min-w-0 space-y-3">
+            {messages.length === 0 && !isStreaming && (
+              <div className="space-y-3 p-4 text-center">
+                <p className="text-sm text-muted-foreground">
+                  {activeId ? "No messages yet. Ask something below." : "Start a conversation to chat about this repo."}
+                </p>
+              </div>
+            )}
+            {messages.map((m) => (
+              <ChatMessage key={m.id} role={m.role} content={m.content} onCitationClick={onCitationClick} />
+            ))}
+            {isStreaming && (
+              <div className="space-y-2">
+                {statusText && (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <motion.span
+                      className="flex h-4 w-4 items-center justify-center"
+                      animate={{ opacity: [1, 0.4, 1] }}
+                      transition={{ duration: 1.2, repeat: Infinity }}
+                    >
+                      <Search className="h-3.5 w-3.5" />
+                    </motion.span>
+                    {statusText}
+                  </div>
+                )}
+                {streamingText && (
+                  <div className="flex items-end gap-1">
+                    <ChatMessage role="assistant" content={streamingText} onCitationClick={onCitationClick} />
+                    <span
+                      data-testid="streaming-cursor"
+                      className="mb-2 h-3 w-1.5 shrink-0 animate-pulse-subtle rounded-sm bg-primary"
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+            {error && (
+              <div className="flex items-center gap-2 text-sm text-destructive">
+                <p>{error}</p>
+                {failedMessage && (
+                  <Button size="sm" variant="outline" onClick={handleRetry} disabled={isStreaming}>
+                    Retry
+                  </Button>
+                )}
+              </div>
+            )}
+            <div ref={bottomRef} />
+          </div>
+        </ScrollArea>
+        {!autoScroll && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setAutoScroll(true);
+              scrollToBottom("smooth");
+            }}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2"
+          >
+            <ArrowDown className="mr-1 h-3.5 w-3.5" /> Jump to bottom
+          </Button>
+        )}
+      </div>
+      {activeId && (
+        <div className="flex flex-wrap items-center gap-2 px-3 pt-2">
+          {QUICK_PROMPTS.map((prompt) => (
+            <button
+              key={prompt.label}
+              type="button"
+              onClick={() => handleSend(prompt.label)}
+              disabled={isStreaming}
+              className="glow-pill glass flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span aria-hidden="true">{prompt.emoji}</span>
+              {prompt.label}
+            </button>
+          ))}
+        </div>
+      )}
+      <ChatInput
+        onSend={handleSend}
+        onStop={handleStop}
+        disabled={!activeId || isStreaming}
+        isStreaming={isStreaming}
+      />
+    </div>
+  );
+}

@@ -1,0 +1,647 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { TextEncoder, TextDecoder } from "util";
+import { ChatPanel } from "./chat-panel";
+
+// This jsdom test environment doesn't provide TextEncoder/TextDecoder as
+// globals (unlike a real browser), but chat-panel.tsx's streaming reader
+// loop calls `new TextDecoder()` directly. Polyfill from Node's `util` so
+// the real handleSend code path -- not a mock of it -- runs in this suite.
+// Node's `util` types for these differ slightly from the DOM lib types
+// (e.g. TextDecoder#decode's `input` parameter), so this assigns through
+// `any` rather than fighting the two declaration sets into alignment.
+(global as any).TextEncoder = TextEncoder;
+(global as any).TextDecoder = TextDecoder;
+
+function sseFrame(type: string, data: unknown) {
+  return `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+// A minimal stand-in for a fetch Response's streaming `body`: just enough of
+// the ReadableStream reader surface (`getReader().read()`) for chat-panel's
+// reader loop to consume, without depending on a real ReadableStream global
+// (also missing in this test environment).
+function makeStreamingBody(frames: string[]) {
+  const encoder = new TextEncoder();
+  let i = 0;
+  return {
+    getReader() {
+      return {
+        async read() {
+          if (i < frames.length) {
+            const chunk = encoder.encode(frames[i]);
+            i += 1;
+            return { done: false, value: chunk };
+          }
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+}
+
+describe("ChatPanel streaming", () => {
+  const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+
+  it("refetches messages instead of rendering a blank bubble when 'done' arrives with no token events", async () => {
+    // Mirrors the backend's agent give-up path (max tool-call iterations
+    // with no textual answer): "done" fires with zero preceding "token"
+    // events, so the client's locally-accumulated finalText is empty even
+    // though the backend actually persisted real explanatory text.
+    const persistedMessages = [
+      { id: "m1", role: "user", content: "Find the answer", created_at: "" },
+      {
+        id: "m2",
+        role: "assistant",
+        content: "I couldn't find a definitive answer after searching the code.",
+        created_at: "",
+      },
+    ];
+
+    let messagesGetCount = 0;
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        messagesGetCount += 1;
+        // 1st call: initial history load for the newly-active conversation
+        // (empty). 2nd call: the post-"done" refetch triggered by the empty
+        // finalText -- this is the one that should surface the real
+        // persisted text instead of a blank bubble.
+        return Promise.resolve({
+          ok: true,
+          json: async () => (messagesGetCount === 1 ? [] : persistedMessages),
+        } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([sseFrame("done", { message_id: "m2" })]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    // Wait for the fetched conversation to become active -- the chat input
+    // is disabled until then.
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "Find the answer");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    expect(
+      await screen.findByText("I couldn't find a definitive answer after searching the code.")
+    ).toBeInTheDocument();
+    expect(messagesGetCount).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("ChatPanel error retry", () => {
+  it("automatically retries and recovers silently when the initial POST fails outright (no manual click needed)", async () => {
+    // A failure before any SSE event is read (thrown fetch, or a fast
+    // `!res.ok`) means nothing was ever generated/persisted server-side --
+    // safe to retry without the user noticing, unlike a mid-stream failure.
+    const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+    let messagesPostCount = 0;
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        messagesPostCount += 1;
+        expect(JSON.parse(init?.body as string)).toEqual({ content: "Find the answer" });
+        if (messagesPostCount === 1) {
+          // First attempt fails outright (e.g. the backend was briefly
+          // unreachable during a background analysis job) -- no body at
+          // all, mirroring the `!res.ok` path.
+          return Promise.resolve({ ok: false, body: null } as unknown as Response);
+        }
+        // Automatic retry succeeds.
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([sseFrame("token", { text: "Here is the answer." }), sseFrame("done", { message_id: "m2" })]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "Find the answer");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    // The automatic retry has a real ~1.5s delay -- give findByText enough
+    // headroom to observe it without the test itself controlling time.
+    expect(await screen.findByText("Here is the answer.", {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(messagesPostCount).toBe(2);
+    expect(screen.queryByText("Could not send that message. Please try again.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  }, 10000);
+
+  it("falls back to the manual Retry button once automatic retries are exhausted", async () => {
+    const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+    let messagesPostCount = 0;
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        messagesPostCount += 1;
+        if (messagesPostCount <= 2) {
+          // Both the initial attempt and the one automatic retry fail --
+          // MAX_SEND_ATTEMPTS is exhausted, so the persistent error UI
+          // (with a manual Retry button) must appear.
+          return Promise.resolve({ ok: false, body: null } as unknown as Response);
+        }
+        // The user's manual click succeeds.
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([sseFrame("token", { text: "Here is the answer." }), sseFrame("done", { message_id: "m2" })]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "Find the answer");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    expect(
+      await screen.findByText("Could not send that message. Please try again.", {}, { timeout: 4000 })
+    ).toBeInTheDocument();
+    expect(messagesPostCount).toBe(2);
+    const retryButton = screen.getByRole("button", { name: "Retry" });
+
+    await userEvent.click(retryButton);
+
+    expect(await screen.findByText("Here is the answer.")).toBeInTheDocument();
+    expect(messagesPostCount).toBe(3);
+    expect(screen.queryByText("Could not send that message. Please try again.")).not.toBeInTheDocument();
+  }, 10000);
+
+  it("does not auto-retry a failure that happens after streaming has already started", async () => {
+    // Once any SSE event has been read, the backend has already accepted
+    // and may be generating/persisting the turn -- retrying automatically
+    // here would risk duplicating it, so this must surface the error
+    // immediately with only the manual Retry path available.
+    const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+    let messagesPostCount = 0;
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        messagesPostCount += 1;
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([sseFrame("error", { message: "The assistant hit an error." })]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "Find the answer");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    expect(await screen.findByText("The assistant hit an error.")).toBeInTheDocument();
+    expect(messagesPostCount).toBe(1); // no automatic retry
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("clears the in-progress partial answer when the stream errors out mid-response", async () => {
+    // A mid-stream failure (e.g. Groq's stream disconnecting after a few
+    // tokens) must not leave a dangling, never-saved partial assistant
+    // bubble on screen next to the error banner -- that reads as a stuck,
+    // half-finished answer rather than a clean "something went wrong" state.
+    const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([
+            sseFrame("token", { text: "Here is a partial ans" }),
+            sseFrame("error", { message: "The AI provider is currently unavailable. Please try again." }),
+          ]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "Find the answer");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    expect(
+      await screen.findByText("The AI provider is currently unavailable. Please try again.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Here is a partial ans/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("streaming-cursor")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("refetches conversation titles after a turn ends in an error", async () => {
+    // The backend derives a conversation's title from its first message
+    // right after persisting it -- before it ever attempts the LLM call
+    // (see chat.py's send_message) -- so the title can already be set
+    // server-side even when this turn's reply then fails. Refetching
+    // unconditionally on every completed/failed turn (rather than only
+    // when a client-side "is this the first message" check says so) also
+    // sidesteps a real race: `messages` can still hold the previous
+    // conversation's messages for a moment after switching to a brand new
+    // one, until that conversation's own (empty) message list has finished
+    // loading.
+    let conversationsFetchCount = 0;
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        conversationsFetchCount += 1;
+        const title = conversationsFetchCount === 1 ? "New conversation" : "Find the answer";
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{ id: "c1", repo_id: "repo-1", title, created_at: "" }],
+        } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([
+            sseFrame("error", { message: "The AI provider is currently unavailable. Please try again." }),
+          ]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "Find the answer");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    await screen.findByText("The AI provider is currently unavailable. Please try again.");
+    await waitFor(() => expect(conversationsFetchCount).toBeGreaterThanOrEqual(2));
+  });
+});
+
+describe("ChatPanel quick prompts and streaming cursor", () => {
+  const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+
+  it("shows quick-prompt pills above the input as soon as a conversation is active, not just when empty", async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    expect(await screen.findByRole("button", { name: /where is the entry point/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /explain auth\/data flow/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /how to add a new feature/i })).toBeInTheDocument();
+  });
+
+  it("clicking a quick-prompt pill sends it immediately via the existing send path", async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        expect(JSON.parse(init?.body as string)).toEqual({ content: "Where is the entry point?" });
+        return Promise.resolve({
+          ok: true,
+          body: makeStreamingBody([
+            sseFrame("token", { text: "Here's the entry point." }),
+            sseFrame("done", { message_id: "m2" }),
+          ]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+    const pill = await screen.findByRole("button", { name: /where is the entry point/i });
+
+    await userEvent.click(pill);
+
+    expect(await screen.findByText("Here's the entry point.")).toBeInTheDocument();
+  });
+
+  it("shows a streaming cursor while a response is still arriving", async () => {
+    // A reader whose stream never signals `done` after its first token,
+    // simulating a response still in flight -- so isStreaming stays true
+    // for the duration of this test instead of settling immediately.
+    function makeHangingStreamingBody(frames: string[]) {
+      const encoder = new TextEncoder();
+      let i = 0;
+      return {
+        getReader() {
+          return {
+            async read() {
+              if (i < frames.length) {
+                const chunk = encoder.encode(frames[i]);
+                i += 1;
+                return { done: false, value: chunk };
+              }
+              return new Promise(() => {}); // never resolves -- stream stays "open"
+            },
+          };
+        },
+      };
+    }
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          body: makeHangingStreamingBody([sseFrame("token", { text: "Still working..." })]),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "hi");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    expect(await screen.findByTestId("streaming-cursor")).toBeInTheDocument();
+  });
+});
+
+describe("ChatPanel stop generating", () => {
+  // Unlike makeHangingStreamingBody (which never resolves at all, for tests
+  // that just need isStreaming to stay true), this mock's pending read()
+  // rejects like a real fetch stream does once its AbortController fires --
+  // needed to exercise chat-panel.tsx's actual abort-handling branch rather
+  // than just asserting the button renders.
+  function makeAbortableStreamingBody(frames: string[], signal: AbortSignal) {
+    const encoder = new TextEncoder();
+    let i = 0;
+    return {
+      getReader() {
+        return {
+          read() {
+            if (i < frames.length) {
+              const chunk = encoder.encode(frames[i]);
+              i += 1;
+              return Promise.resolve({ done: false, value: chunk });
+            }
+            return new Promise((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+            });
+          },
+        };
+      },
+    };
+  }
+
+  const conversation = { id: "c1", repo_id: "repo-1", title: "New conversation", created_at: "" };
+
+  it("swaps the send button for a Stop button while streaming, and stopping keeps the partial answer without an error banner", async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [conversation] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/conversations/c1/messages" && method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          body: makeAbortableStreamingBody([sseFrame("token", { text: "Partial answer before stop" })], init!.signal!),
+        } as unknown as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+    const textbox = screen.getByPlaceholderText("Ask about this repo...");
+    await waitFor(() => expect(textbox).not.toBeDisabled());
+
+    await userEvent.type(textbox, "hi");
+    await userEvent.click(screen.getByLabelText("Send message"));
+
+    const stopButton = await screen.findByLabelText("Stop generating");
+    expect(screen.queryByLabelText("Send message")).not.toBeInTheDocument();
+
+    await userEvent.click(stopButton);
+
+    expect(await screen.findByText("Partial answer before stop")).toBeInTheDocument();
+    expect(screen.queryByTestId("streaming-cursor")).not.toBeInTheDocument();
+    expect(screen.queryByText("Connection lost while streaming the response.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    // The Send button is disabled here too (see chat-input.tsx: it's also
+    // gated on the textarea being non-empty, and it was cleared when this
+    // message was originally sent) -- unrelated to stopping, so only its
+    // presence (i.e. the Stop button was swapped back out) is asserted.
+    expect(screen.queryByLabelText("Stop generating")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Send message")).toBeInTheDocument();
+  });
+});
+
+describe("ChatPanel error handling", () => {
+  it("surfaces an error via the same error UI as handleSend when the conversations list fetch fails", async () => {
+    // Before the fix, this effect had no .catch() at all -- a network
+    // failure here left an unhandled promise rejection and no visible
+    // signal to the user that anything went wrong.
+    global.fetch = jest.fn().mockRejectedValue(new TypeError("Failed to fetch")) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    expect(await screen.findByText("Could not load conversations. Please refresh the page.")).toBeInTheDocument();
+  });
+
+  it("surfaces an error via the same error UI as handleSend when the conversations list fetch returns non-ok", async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({}) }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    expect(await screen.findByText("Could not load conversations. Please refresh the page.")).toBeInTheDocument();
+  });
+
+  it("surfaces an error instead of silently doing nothing when creating a new conversation fails", async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/repos/repo-1/conversations" && method === "POST") {
+        return Promise.resolve({ ok: false, json: async () => ({ detail: "nope" }) } as Response);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const createButton = await screen.findByRole("button", { name: /new conversation/i });
+    await userEvent.click(createButton);
+
+    expect(await screen.findByText("Could not start a new conversation. Please try again.")).toBeInTheDocument();
+  });
+
+  it("surfaces an error when creating a new conversation throws (network failure)", async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/repos/repo-1/conversations" && method === "GET") {
+        return Promise.resolve({ ok: true, json: async () => [] } as Response);
+      }
+      if (url === "/api/repos/repo-1/conversations" && method === "POST") {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const createButton = await screen.findByRole("button", { name: /new conversation/i });
+    await userEvent.click(createButton);
+
+    expect(await screen.findByText("Could not start a new conversation. Please try again.")).toBeInTheDocument();
+  });
+});
+
+describe("ChatPanel auto-scroll", () => {
+  function mockScrollMetrics(
+    el: Element,
+    metrics: { scrollHeight: number; scrollTop: number; clientHeight: number }
+  ) {
+    Object.defineProperty(el, "scrollHeight", { value: metrics.scrollHeight, configurable: true });
+    Object.defineProperty(el, "scrollTop", { value: metrics.scrollTop, configurable: true });
+    Object.defineProperty(el, "clientHeight", { value: metrics.clientHeight, configurable: true });
+  }
+
+  it("only turns auto-follow off on real user-input scroll events (wheel/touch), never on a bare 'scroll' event", async () => {
+    // Regression test for the fix: the app's own scroll-to-bottom calls
+    // (the auto-follow effect, the "jump to bottom" button) fire native
+    // "scroll" events indistinguishable from a user's own scroll by event
+    // shape alone -- including at every intermediate frame of a "smooth"
+    // scrollIntoView animation. If a bare "scroll" event could flip
+    // auto-follow off, the app could self-cancel its own auto-follow with
+    // no user action at all. Only genuine input events (wheel, touch)
+    // should be able to do that.
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => [] }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const viewport = document.querySelector("[data-radix-scroll-area-viewport]");
+    if (!viewport) throw new Error("scroll viewport not found in the rendered ScrollArea");
+
+    // Simulate scroll position "far from bottom" (500px of the 1000px
+    // scrollHeight still below the visible 500px clientHeight).
+    mockScrollMetrics(viewport, { scrollHeight: 1000, scrollTop: 0, clientHeight: 500 });
+
+    fireEvent.scroll(viewport);
+    expect(screen.queryByText("Jump to bottom")).not.toBeInTheDocument();
+
+    fireEvent.wheel(viewport);
+    expect(await screen.findByText("Jump to bottom")).toBeInTheDocument();
+  });
+
+  it("turns auto-follow off on a touch-drag scroll (touchstart/touchmove), not just wheel", async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => [] }) as unknown as typeof fetch;
+
+    render(<ChatPanel repoId="repo-1" />);
+
+    const viewport = document.querySelector("[data-radix-scroll-area-viewport]");
+    if (!viewport) throw new Error("scroll viewport not found in the rendered ScrollArea");
+
+    mockScrollMetrics(viewport, { scrollHeight: 1000, scrollTop: 0, clientHeight: 500 });
+
+    fireEvent.touchStart(viewport);
+    expect(await screen.findByText("Jump to bottom")).toBeInTheDocument();
+  });
+});
