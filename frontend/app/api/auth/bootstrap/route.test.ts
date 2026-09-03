@@ -66,6 +66,29 @@ describe("GET /api/auth/bootstrap", () => {
     expect(res.headers.get("location")).toBe("http://localhost/repos");
   });
 
+  it("returns JSON instead of redirecting when format=json is set, still setting the cookie", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ access_token: "guest-token-123" }),
+    }) as unknown as typeof fetch;
+
+    const res = await GET(new NextRequest("http://localhost/api/auth/bootstrap?format=json"));
+
+    expect(store.get("session_token")).toBe("guest-token-123");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it("returns { ok: false } in JSON mode, without setting a cookie, when the backend is unreachable", async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error("network error"));
+
+    const res = await GET(new NextRequest("http://localhost/api/auth/bootstrap?format=json"));
+
+    expect(store.has("session_token")).toBe(false);
+    expect(await res.json()).toEqual({ ok: false });
+  });
+
   it("fails open when the guest-mint fetch exceeds its timeout", async () => {
     global.fetch = jest.fn().mockImplementation(
       (_url, init) =>

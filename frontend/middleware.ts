@@ -24,6 +24,17 @@ export function middleware(request: NextRequest): NextResponse {
     return NextResponse.next();
   }
 
+  // "/repos" is the landing page -- it renders its own static shell (Hero,
+  // FAQ, footer) immediately even with no session yet, deferring the
+  // guest-mint + repo-list fetch to a client component
+  // (components/repo-list-client.tsx) instead of blocking first paint on
+  // this redirect + a backend round trip. Every other gated route keeps
+  // the original behavior: no cookie means no render at all, redirected
+  // to bootstrap first.
+  if (request.nextUrl.pathname === "/repos") {
+    return NextResponse.next();
+  }
+
   const bootstrapUrl = new URL("/api/auth/bootstrap", request.url);
   bootstrapUrl.searchParams.set("next", request.nextUrl.pathname + request.nextUrl.search);
   return NextResponse.redirect(bootstrapUrl);

@@ -23,7 +23,15 @@ const GUEST_MINT_TIMEOUT_MS = 8000;
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const next = request.nextUrl.searchParams.get("next") || "/";
   const destination = new URL(next, request.url);
+  // "/repos" (see middleware.ts) calls this route via `fetch()` from a
+  // client component instead of a full navigation, so it can bootstrap the
+  // guest session in the background without blocking first paint --
+  // `format=json` returns a small JSON body instead of a redirect for that
+  // caller. The default (no query param) navigation-redirect behavior is
+  // unchanged for every other gated route.
+  const jsonMode = request.nextUrl.searchParams.get("format") === "json";
 
+  let minted = false;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), GUEST_MINT_TIMEOUT_MS);
@@ -35,15 +43,21 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       if (guestResponse.ok) {
         const body = (await guestResponse.json()) as { access_token: string };
         setSessionToken(body.access_token);
+        minted = true;
       }
     } finally {
       clearTimeout(timeout);
     }
   } catch {
-    // Backend unreachable, slow, or timed out -- fall through and redirect
-    // without a cookie, same fail-open contract the old in-middleware
-    // version had.
+    // Backend unreachable, slow, or timed out -- fall through. Navigation
+    // callers fail open (redirect without a cookie, same contract the old
+    // in-middleware version had); JSON callers get { ok: false } and leave
+    // the retry/error handling to their own caller (see
+    // components/repo-list-client.tsx).
   }
 
+  if (jsonMode) {
+    return NextResponse.json({ ok: minted });
+  }
   return NextResponse.redirect(destination);
 }

@@ -37,6 +37,14 @@ describe("middleware", () => {
     expect(response.headers.get("location")).toBeNull();
   });
 
+  it("lets /repos through with no cookie -- its own shell renders instantly and defers bootstrap to a client component", () => {
+    const request = new NextRequest("http://localhost:3000/repos");
+
+    const response = middleware(request);
+
+    expect(response.headers.get("location")).toBeNull();
+  });
+
   it("redirects to the bootstrap route, preserving the original destination, when no cookie exists", () => {
     const request = new NextRequest("http://localhost:3000/repos/abc?job=123");
 

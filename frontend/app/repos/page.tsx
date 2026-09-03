@@ -5,24 +5,23 @@ import { backendUrl } from "@/lib/backend";
 import { getSessionToken } from "@/lib/session";
 import { Hero } from "@/components/hero";
 import { RepoList } from "@/components/repo-list";
+import { RepoListClient } from "@/components/repo-list-client";
 import { FaqSection } from "@/components/faq-section";
 import { SiteFooter } from "@/components/site-footer";
 import type { Repo } from "@/lib/types";
 
-type FetchReposResult = { ok: true; repos: Repo[] } | { ok: false };
+type FetchReposResult = { ok: true; repos: Repo[] } | { ok: false } | { ok: "no-session" };
 
 async function fetchRepos(): Promise<FetchReposResult> {
   const token = getSessionToken();
-  // No /login to send anyone to anymore. A missing/invalid token here
-  // means the middleware's guest-mint attempt itself failed (backend
-  // unreachable) -- redirect through /api/auth/reset (clears any stale
-  // cookie, then lands on "/") so middleware gets a genuinely clean shot
-  // at minting a fresh guest session on the next request, rather than
-  // rendering a broken authenticated page, 404ing on a route that no
-  // longer exists, or looping forever against a present-but-invalid
-  // cookie (see /api/auth/reset/route.ts for why the cookie must be
-  // cleared here rather than just redirecting straight to "/").
-  if (!token) redirect("/api/auth/reset");
+  // No session cookie yet is no longer an error path here: middleware.ts
+  // now lets "/repos" render without one (see that file), so this page's
+  // own shell (Hero/FAQ/footer, below) paints immediately and
+  // <RepoListClient> takes over bootstrapping the guest session +
+  // fetching the repo list client-side, instead of this Server Component
+  // blocking on a redirect. A *stale/invalid* cookie is a different case,
+  // still handled below via the 401 branch.
+  if (!token) return { ok: "no-session" };
 
   // `redirect()` below works by throwing a special Next.js-internal error
   // that the framework catches further up to actually perform the
@@ -63,7 +62,9 @@ export default async function ReposPage() {
     <main className="mx-auto max-w-6xl px-6 py-10 sm:py-16">
       <Hero />
       <h2 className="mb-6 text-xl font-semibold text-foreground">Your repositories</h2>
-      {result.ok ? (
+      {result.ok === "no-session" ? (
+        <RepoListClient />
+      ) : result.ok ? (
         <RepoList repos={result.repos} />
       ) : (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-border p-8 text-center">

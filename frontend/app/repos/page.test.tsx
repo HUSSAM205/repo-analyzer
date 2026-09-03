@@ -72,8 +72,23 @@ describe("ReposPage", () => {
     expect(screen.queryByText("Can't reach the server")).not.toBeInTheDocument();
   });
 
-  it("redirects through /api/auth/reset when there's no session cookie", async () => {
+  it("renders the page shell immediately (no redirect) when there's no session cookie yet", async () => {
+    // middleware.ts now lets "/repos" through with no cookie -- this page
+    // must never redirect in that case either; <RepoListClient> (not
+    // exercised in depth here, see its own test file) takes over
+    // bootstrapping + fetching the repo list client-side instead.
     store.clear();
+    global.fetch = jest.fn().mockResolvedValue({ ok: false }) as unknown as typeof fetch;
+
+    const ui = await ReposPage();
+    render(ui);
+
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/paste a repo/i);
+    expect(screen.getByLabelText("Loading repositories")).toBeInTheDocument();
+  });
+
+  it("redirects through /api/auth/reset when the session cookie is present but the backend rejects it", async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 401 }) as unknown as typeof fetch;
 
     await expect(ReposPage()).rejects.toThrow("NEXT_REDIRECT:/api/auth/reset");
   });
