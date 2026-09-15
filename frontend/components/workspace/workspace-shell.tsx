@@ -187,7 +187,10 @@ function WorkspaceTabs({ active, onChange }: { active: TabKey; onChange: (tab: T
           aria-selected={active === tab.key}
           onClick={() => onChange(tab.key)}
           className={cn(
-            "relative flex-1 rounded-full px-2.5 py-1.5 text-xs font-medium transition-colors",
+            // max-md:py-3 (desktop keeps the compact py-1.5 pill; only the
+            // sub-1024px tabbed layout -- the one that's actually driven by
+            // touch -- grows to a >=44px-tall tap target).
+            "relative flex-1 rounded-full px-2.5 py-1.5 max-md:py-3 text-xs font-medium transition-colors",
             active === tab.key ? "text-zinc-950" : "text-zinc-400 hover:text-zinc-200"
           )}
         >

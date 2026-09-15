@@ -75,6 +75,23 @@ async def test_ip_rate_limit_does_not_affect_a_different_ip():
 
 
 @pytest.mark.asyncio
+async def test_ip_rate_limit_applies_to_guest_session_minting():
+    # POST /api/v1/auth/guest needs no token to call at all -- it's the one
+    # write endpoint with no per-user gate to fall back on, so this IP gate
+    # is its only throttle.
+    same_ip_headers = {"X-Forwarded-For": "203.0.113.55"}
+    request_count = rate_limit_settings.rate_limit_ip_guest_bucket_capacity + 3
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        last_status = None
+        for _ in range(request_count):
+            resp = await client.post("/api/v1/auth/guest", headers=same_ip_headers)
+            last_status = resp.status_code
+
+        assert last_status == 429
+
+
+@pytest.mark.asyncio
 async def test_takes_only_the_first_hop_of_x_forwarded_for():
     # X-Forwarded-For is proxy-appended left-to-right with the real client's
     # IP first -- a multi-hop value (e.g. through Render's own edge plus any

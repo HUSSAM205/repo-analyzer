@@ -57,9 +57,17 @@ function usePersistedCollapsed(): [boolean, (value: boolean) => void] {
   return [collapsed, update];
 }
 
+// max-md:py-3 (desktop keeps py-2/~36px tall rows; below the md breakpoint
+// -- where taps replace a mouse cursor's precision -- rows grow to
+// py-3/~44px, meeting the WCAG/platform touch-target minimum) without
+// touching the dense, professional-tool look on pointer/fine devices at
+// all. Nav items have real vertical gaps between them (space-y-0.5 in
+// SidebarContent), so a straightforward padding increase is safe here --
+// unlike file-tree-node.tsx's tightly-packed rows, there's no risk of one
+// row's larger hit area swallowing a tap meant for its neighbor.
 const NAV_BUTTON_CLASSES = (collapsed: boolean, active: boolean | undefined, disabled: boolean | undefined) =>
   cn(
-    "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+    "flex w-full items-center gap-3 rounded-lg px-3 py-2 max-md:py-3 text-sm font-medium transition-colors",
     collapsed && "justify-center px-0",
     active
       ? "bg-primary text-primary-foreground"
@@ -152,7 +160,7 @@ function PastReposSection({ collapsed, onNavigate }: { collapsed: boolean; onNav
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        className="flex w-full items-center gap-3 rounded-md px-3 py-2 max-md:py-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
       >
         <History className="h-4 w-4 shrink-0" aria-hidden="true" />
         <span className="flex-1 truncate text-left">Past Analyzed Repos</span>

@@ -4,28 +4,8 @@ import { useEffect, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { RepoList } from "@/components/repo-list";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ensureSessionBootstrapped } from "@/lib/session-bootstrap";
 import type { Repo } from "@/lib/types";
-
-// Module-level, not component state -- dedupes the guest-mint call across
-// every concurrent caller in this tab (React StrictMode's double-invoked
-// effects in dev, or a future second mount of this component), so a first
-// visit only ever triggers ONE POST /api/v1/auth/guest, not one per
-// caller. Reset to null on failure so a later mount (not just a full page
-// reload, which would reset this anyway) can retry instead of a transient
-// failure being cached forever for the rest of this tab's lifetime.
-let bootstrapPromise: Promise<void> | null = null;
-
-function ensureBootstrapped(): Promise<void> {
-  if (!bootstrapPromise) {
-    bootstrapPromise = fetch("/api/auth/bootstrap?format=json")
-      .then(() => undefined)
-      .catch((err) => {
-        bootstrapPromise = null;
-        throw err;
-      });
-  }
-  return bootstrapPromise;
-}
 
 type State = { status: "loading" } | { status: "ready"; repos: Repo[] } | { status: "error" };
 
@@ -40,7 +20,7 @@ export function RepoListClient() {
     let cancelled = false;
     async function load() {
       try {
-        await ensureBootstrapped();
+        await ensureSessionBootstrapped();
         const res = await fetch("/api/repos", { cache: "no-store" });
         if (!res.ok) {
           if (!cancelled) setState({ status: "error" });

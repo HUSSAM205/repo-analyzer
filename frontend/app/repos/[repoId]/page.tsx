@@ -8,6 +8,7 @@ import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { FileTree } from "@/components/workspace/file-tree";
 import { CodeViewer } from "@/components/workspace/code-viewer";
 import { ChatPanel } from "@/components/workspace/chat-panel";
+import { PanelErrorBoundary } from "@/components/error-boundary";
 import { RepoBriefing } from "@/components/workspace/repo-briefing";
 import { Eli10Card } from "@/components/workspace/eli10-card";
 import { AnalysisProgress } from "@/components/workspace/analysis-progress";
@@ -28,6 +29,13 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
   const [repo, setRepo] = useState<Repo | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // Bumped by a panel's own PanelErrorBoundary onReset -- forces a full
+  // unmount/remount of just that one panel (via the `key` below) rather
+  // than only clearing the boundary's own hasError flag, so the panel's
+  // own internal fetch state (FileTree's tree, CodeViewer's file content,
+  // ChatPanel's conversation) genuinely starts over instead of retrying
+  // with whatever stale state caused the error in the first place.
+  const [panelRetryKeys, setPanelRetryKeys] = useState({ left: 0, center: 0, right: 0 });
 
   useEffect(() => {
     let cancelled = false;
@@ -138,16 +146,38 @@ export default function RepoWorkspacePage({ params }: { params: { repoId: string
       </AnimatePresence>
       <WorkspaceShell
         left={
-          <FileTree
-            repoId={params.repoId}
-            polling={polling}
-            stage={effectiveJob?.stage}
-            selectedPath={selectedPath}
-            onSelectFile={setSelectedPath}
-          />
+          <PanelErrorBoundary
+            key={panelRetryKeys.left}
+            label="file tree"
+            onReset={() => setPanelRetryKeys((prev) => ({ ...prev, left: prev.left + 1 }))}
+          >
+            <FileTree
+              repoId={params.repoId}
+              polling={polling}
+              stage={effectiveJob?.stage}
+              selectedPath={selectedPath}
+              onSelectFile={setSelectedPath}
+            />
+          </PanelErrorBoundary>
         }
-        center={<CodeViewer repoId={params.repoId} path={selectedPath} />}
-        right={<ChatPanel repoId={params.repoId} onCitationClick={setSelectedPath} />}
+        center={
+          <PanelErrorBoundary
+            key={panelRetryKeys.center}
+            label="code viewer"
+            onReset={() => setPanelRetryKeys((prev) => ({ ...prev, center: prev.center + 1 }))}
+          >
+            <CodeViewer repoId={params.repoId} path={selectedPath} />
+          </PanelErrorBoundary>
+        }
+        right={
+          <PanelErrorBoundary
+            key={panelRetryKeys.right}
+            label="AI chat"
+            onReset={() => setPanelRetryKeys((prev) => ({ ...prev, right: prev.right + 1 }))}
+          >
+            <ChatPanel repoId={params.repoId} onCitationClick={setSelectedPath} />
+          </PanelErrorBoundary>
+        }
       />
     </>
   );

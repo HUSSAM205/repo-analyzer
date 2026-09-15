@@ -49,3 +49,11 @@ def test_accepts_real_github_repo_urls(url):
 def test_rejects_non_github_or_malformed_urls(url):
     with pytest.raises(ValidationError):
         RepoAnalyzeRequest(repo_url=url)
+
+
+def test_rejects_an_undeclared_extra_field():
+    # RepoAnalyzeRequest inherits StrictRequestModel (extra="forbid") -- a
+    # caller-supplied field this schema doesn't declare must be rejected
+    # outright, not silently dropped (pydantic v2's default).
+    with pytest.raises(ValidationError):
+        RepoAnalyzeRequest(repo_url="https://github.com/tiangolo/fastapi", admin=True)

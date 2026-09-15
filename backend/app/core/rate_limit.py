@@ -188,3 +188,19 @@ async def enforce_ip_chat_rate_limit(request: Request) -> None:
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many chat requests from this network. Try again shortly.",
         )
+
+
+# POST /api/v1/auth/guest needs no auth token to call by design (it's what
+# mints one) -- that makes it the one write endpoint with no per-user gate
+# to fall back on, so this IP gate is the only throttle it has at all.
+async def enforce_ip_guest_rate_limit(request: Request) -> None:
+    allowed = await check_token_bucket(
+        key=f"rate_limit:ip:guest:{_client_ip(request)}",
+        capacity=settings.rate_limit_ip_guest_bucket_capacity,
+        refill_per_minute=settings.rate_limit_ip_guest_per_minute,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many session requests from this network. Try again shortly.",
+        )

@@ -2,8 +2,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.schemas.base import StrictRequestModel
 
-class FeedbackRequest(BaseModel):
+
+class FeedbackRequest(StrictRequestModel):
     type: Literal["bug", "feature", "rating"]
     # Not min_length=1 at the field level -- a "rating" submission conveys
     # real feedback via its star rating alone, so the message is optional

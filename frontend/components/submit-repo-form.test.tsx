@@ -6,16 +6,30 @@ jest.mock("next/navigation", () => ({
   useRouter: () => ({ push: jest.fn(), refresh: jest.fn() }),
 }));
 
+// submit() now awaits the shared, deduped session-bootstrap fetch (see
+// lib/session-bootstrap.ts) before the real POST /api/repos -- a bare
+// sequential `mockResolvedValueOnce` queue would hand that first response
+// to the bootstrap call instead of the one each test actually cares about.
+// A URL-aware mock sidesteps that regardless of how many times bootstrap
+// itself gets called (it's deduped at the module level, so in practice
+// that's usually just once across this whole file).
+function mockFetchForAnalyze(analyzeResponse: { ok: boolean; json: () => Promise<unknown> }) {
+  global.fetch = jest.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/auth/bootstrap")) {
+      return Promise.resolve({ ok: true, json: async () => ({ ok: true }) });
+    }
+    return Promise.resolve(analyzeResponse);
+  }) as unknown as typeof fetch;
+}
+
 describe("SubmitRepoForm", () => {
   beforeEach(() => {
     global.fetch = jest.fn();
   });
 
   it("submits the URL and shows a submitting state", async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ repo_id: "r1", job_id: "j1" }),
-    });
+    mockFetchForAnalyze({ ok: true, json: async () => ({ repo_id: "r1", job_id: "j1" }) });
 
     render(<SubmitRepoForm />);
     const input = screen.getByLabelText("GitHub repository URL");
@@ -34,10 +48,7 @@ describe("SubmitRepoForm", () => {
   });
 
   it("does not clear the URL after a successful submit (it lives in a persistent layout header)", async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ repo_id: "r1", job_id: "j1" }),
-    });
+    mockFetchForAnalyze({ ok: true, json: async () => ({ repo_id: "r1", job_id: "j1" }) });
 
     render(<SubmitRepoForm />);
     const input = screen.getByLabelText("GitHub repository URL") as HTMLInputElement;
@@ -45,7 +56,7 @@ describe("SubmitRepoForm", () => {
     await userEvent.click(screen.getByRole("button", { name: /analyze/i }));
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalled();
+      expect(global.fetch).toHaveBeenCalledWith("/api/repos", expect.anything());
     });
 
     expect(input.value).toBe("https://github.com/octocat/Hello-World");
@@ -72,10 +83,7 @@ describe("SubmitRepoForm", () => {
   });
 
   it("shows the backend's error message on failure", async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: false,
-      json: async () => ({ detail: "Rate limit exceeded" }),
-    });
+    mockFetchForAnalyze({ ok: false, json: async () => ({ detail: "Rate limit exceeded" }) });
 
     render(<SubmitRepoForm />);
     await userEvent.type(screen.getByLabelText("GitHub repository URL"), "https://github.com/a/b");

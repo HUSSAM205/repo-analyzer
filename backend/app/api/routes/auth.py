@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.rate_limit import enforce_ip_guest_rate_limit
 from app.core.security import create_access_token, generate_api_key, hash_password, verify_password
 from app.db.models import ApiKey, User
 from app.db.session import get_db
@@ -33,7 +34,12 @@ async def register(payload: UserCreate, db: Annotated[AsyncSession, Depends(get_
     return user
 
 
-@router.post("/guest", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/guest",
+    response_model=TokenResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(enforce_ip_guest_rate_limit)],
+)
 async def create_guest(db: Annotated[AsyncSession, Depends(get_db)]) -> TokenResponse:
     user = User(is_guest=True, email=None, hashed_password=None)
     db.add(user)

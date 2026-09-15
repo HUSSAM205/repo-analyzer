@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, HttpUrl, field_validator
 
+from app.schemas.base import StrictRequestModel
+
 # `HttpUrl` alone only guarantees a well-formed http(s) URL -- it does NOT
 # stop this value from being an SSRF vector once it reaches
 # ingestion.clone_repo's `git.Repo.clone_from(url, ...)` call. Confirmed
@@ -29,7 +31,7 @@ _ALLOWED_HOST = "github.com"
 _REPO_PATH_RE = re.compile(r"^/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:\.git)?/?$")
 
 
-class RepoAnalyzeRequest(BaseModel):
+class RepoAnalyzeRequest(StrictRequestModel):
     repo_url: HttpUrl
 
     @field_validator("repo_url")

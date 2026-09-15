@@ -1,0 +1,27 @@
+# Pings the Render backend's DB-touching keepalive endpoint (see
+# backend/app/main.py's /api/v1/keepalive) so both the free-tier Render
+# instance and the Neon Postgres it talks to stay warm, avoiding a cold
+# start on the next real visitor.
+#
+# Honest caveat, not a guarantee: GitHub Actions' scheduled workflows are
+# best-effort -- GitHub documents real delays of the actual run against the
+# cron time during periods of high platform load, and disables a scheduled
+# workflow entirely after 60 days with no repository activity. This is a
+# free, zero-setup backstop, not a substitute for a dedicated uptime pinger
+# (cron-job.org, UptimeRobot, etc.) if reliable sub-15-minute warmth is a
+# hard requirement.
+name: Keepalive
+
+on:
+  schedule:
+    - cron: "*/9 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend keepalive endpoint
+        run: |
+          curl -sS -m 10 -o /dev/null -w "keepalive: HTTP %{http_code} in %{time_total}s\n" \
+            https://repo-analyzer.onrender.com/api/v1/keepalive

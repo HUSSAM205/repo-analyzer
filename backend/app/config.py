@@ -139,6 +139,12 @@ class Settings(BaseSettings):
     rate_limit_ip_analyze_bucket_capacity: int = 10
     rate_limit_ip_chat_per_minute: int = 60
     rate_limit_ip_chat_bucket_capacity: int = 60
+    # POST /api/v1/auth/guest had no rate limit at all before this -- unlike
+    # every other write endpoint, it needs no auth token to call (that's the
+    # whole point, it's what MINTS one), so it was the one place a single IP
+    # could cheaply mint unlimited guest User rows with no throttle at all.
+    rate_limit_ip_guest_per_minute: int = 10
+    rate_limit_ip_guest_bucket_capacity: int = 10
 
     llm_provider: Literal["anthropic", "openai", "gemini", "groq", "fake"] = "anthropic"
     anthropic_api_key: str | None = None

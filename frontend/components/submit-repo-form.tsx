@@ -7,6 +7,7 @@ import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api-client";
+import { ensureSessionBootstrapped } from "@/lib/session-bootstrap";
 import { cn } from "@/lib/utils";
 import type { AnalyzeRepoResponse } from "@/lib/types";
 
@@ -38,6 +39,14 @@ export const SubmitRepoForm = forwardRef<SubmitRepoFormHandle, { compact?: boole
     setError(null);
     setSubmitting(true);
     try {
+      // On "/repos" with no session cookie yet (see middleware.ts),
+      // RepoListClient already kicks this same bootstrap off on mount --
+      // but a demo-repo-pill click (near-instant, no typing delay) can
+      // still race ahead of it. Awaiting the shared, deduped promise here
+      // closes that gap without ever double-minting a session; if
+      // bootstrap fails, apiFetch's own 401 handling below is still the
+      // fallback, so a failure here is never fatal to this submit attempt.
+      await ensureSessionBootstrapped().catch(() => {});
       const res = await apiFetch("/api/repos", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

@@ -8,8 +8,10 @@ from typing import Annotated
 from arq.worker import create_worker
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette import status as http_status
 
 from app.api.routes import auth, chat, conversations, feedback, files, flagship, jobs, repos, search
 from app.config import get_settings
@@ -119,6 +121,48 @@ async def add_security_headers(request: Request, call_next):
     for header, value in _SECURITY_HEADERS.items():
         response.headers[header] = value
     return response
+
+
+# Every real request body on this API is a small JSON payload (a repo URL, a
+# chat message capped well under 4000 chars, etc.) -- there is no file-upload
+# endpoint at all. This is a cheap, early reject for an oversized body via
+# the Content-Length header, before Starlette reads it into memory at all.
+# Scoped to Content-Length specifically: a client using chunked
+# transfer-encoding with no Content-Length isn't caught here, but every real
+# client this API expects (fetch/axios/httpx, all called from this project's
+# own Next.js proxy routes) always sends one for a JSON body.
+_MAX_REQUEST_BODY_BYTES = 25 * 1024 * 1024
+
+
+@app.middleware("http")
+async def reject_oversized_payloads(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > _MAX_REQUEST_BODY_BYTES:
+                return JSONResponse(
+                    status_code=http_status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    content={"detail": "Request body too large."},
+                )
+        except ValueError:
+            pass
+    return await call_next(request)
+
+
+@app.exception_handler(Exception)
+async def handle_unexpected_exception(request: Request, exc: Exception) -> JSONResponse:
+    # FastAPI's own default handler for HTTPException (401/404/429/etc, used
+    # throughout this app's routes) takes precedence over this one -- this
+    # only ever fires for a genuinely UNEXPECTED error (an unguarded
+    # exception, not a deliberately raised HTTP error), which is exactly
+    # what must never leak a traceback, SQLAlchemy internals, or a file path
+    # into the response. The real exception is still logged server-side in
+    # full.
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "An internal processing exception occurred.", "code": "INTERNAL_ERROR", "status": 500},
+    )
 
 
 # Opt-in only -- see Settings.cors_allowed_origins for why this is empty by

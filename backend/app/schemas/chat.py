@@ -3,8 +3,10 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.base import StrictRequestModel
 
-class ConversationCreate(BaseModel):
+
+class ConversationCreate(StrictRequestModel):
     title: str = Field(default="New conversation", min_length=1, max_length=255)
 
 
@@ -26,5 +28,5 @@ class MessageResponse(BaseModel):
     created_at: datetime
 
 
-class SendMessageRequest(BaseModel):
+class SendMessageRequest(StrictRequestModel):
     content: str = Field(min_length=1, max_length=10000)

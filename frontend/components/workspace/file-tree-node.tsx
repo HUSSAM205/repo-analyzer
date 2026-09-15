@@ -46,8 +46,17 @@ export function FileTreeNode({
           type="button"
           onClick={() => onSelectFile(entry.path)}
           style={{ paddingLeft: `${depth * 14 + 8}px` }}
+          // Deliberately NOT bumped all the way to the 44px touch-target
+          // minimum on mobile, unlike the nav/tab buttons elsewhere in this
+          // pass: rows here sit directly adjacent with zero gap between
+          // them (a real repo's tree can be hundreds of rows deep), so
+          // either growing the row itself or an invisible expanded hit-area
+          // would overlap into the next row and risk mis-taps between
+          // neighboring files -- worse than the current density. max-md:py-1.5
+          // is a real, modest improvement (24px -> ~28px) that stays inside
+          // that constraint.
           className={cn(
-            "flex w-full items-center gap-1.5 rounded-sm border-l-2 border-transparent py-1 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+            "flex w-full items-center gap-1.5 rounded-sm border-l-2 border-transparent py-1 max-md:py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
             selectedPath === entry.path && "elevated-ring border-primary bg-accent text-foreground"
           )}
         >
@@ -64,7 +73,7 @@ export function FileTreeNode({
         type="button"
         onClick={() => setExpanded((v) => !v)}
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
-        className="flex w-full items-center gap-1.5 rounded-sm py-1 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        className="flex w-full items-center gap-1.5 rounded-sm py-1 max-md:py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
       >
         <motion.span animate={{ rotate: expanded ? 90 : 0 }} transition={{ duration: 0.15 }}>
           <ChevronRight className="h-3.5 w-3.5 shrink-0" />
