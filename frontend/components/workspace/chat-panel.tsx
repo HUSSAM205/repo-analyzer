@@ -455,6 +455,13 @@ export function ChatPanel({
         )}
       </div>
       {activeId && (
+        <p className="px-3 pt-2 text-[11px] text-muted-foreground/70">
+          💡 Free-tier AI stream -- if a response ever stalls or hits a rate limit, use{" "}
+          <span className="font-medium text-muted-foreground">New conversation</span> (top-right, above) to start a
+          clean session.
+        </p>
+      )}
+      {activeId && (
         <div className="flex flex-wrap items-center gap-2 px-3 pt-2">
           {QUICK_PROMPTS.map((prompt) => (
             <button

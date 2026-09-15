@@ -30,7 +30,18 @@ export function ConversationPicker({
           </option>
         ))}
       </select>
-      <Button variant="outline" size="icon" onClick={onCreate} aria-label="New conversation">
+      {/* size="icon" is the shared 36x36 icon-button size used across the
+          app (kept as-is on desktop/pointer devices) -- max-md: bumps just
+          this one, mobile-only, to the 44x44 touch-target minimum, since
+          it's the button a stalled/rate-limited chat's advisory note (see
+          below the chat input) points people at. */}
+      <Button
+        variant="outline"
+        size="icon"
+        onClick={onCreate}
+        aria-label="New conversation"
+        className="max-md:h-11 max-md:w-11"
+      >
         <Plus className="h-4 w-4" />
       </Button>
     </div>
