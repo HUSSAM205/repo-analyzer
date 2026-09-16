@@ -23,6 +23,22 @@ class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     job_timeout = 600
     max_jobs = 10
+    # ARQ's own default poll_delay is 0.5s, and this worker runs in-process
+    # for the lifetime of the web service (see Settings.run_worker_in_process
+    # and main.py's lifespan) -- meaning it polls Redis for new jobs 24/7,
+    # completely independent of real traffic. Each poll iteration issues 3
+    # Redis commands (a zrangebyscore for due jobs, plus a 2-command pipeline
+    # checking for aborted jobs -- see arq.worker.Worker._poll_iteration/
+    # _cancel_aborted_jobs), which at the 0.5s default is ~518k commands/day
+    # from idle polling alone -- enough on its own to exhaust a real Redis
+    # command quota with zero actual usage. analyze_repo jobs already take
+    # tens of seconds to minutes end to end (clone+parse+embed), and the
+    # frontend polls job status via Postgres (GET /api/v1/jobs/{id}), not
+    # Redis, at its own 2s interval -- so a few extra seconds of pickup
+    # latency before a queued job starts running is imperceptible against
+    # the job's own total runtime. 15s cuts idle command volume ~30x (to
+    # ~17k/day) while keeping that latency negligible.
+    poll_delay = 15
     # analyze_repo already marks Job and Repo FAILED on every failure path
     # (clone/chunk/embed errors, and a failed RUNNING transition -- see
     # app/workers/tasks.py). ARQ's default max_tries=5 would silently

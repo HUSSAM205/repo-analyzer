@@ -31,3 +31,14 @@ async def test_startup_skips_warming_when_disabled(monkeypatch):
     await worker_settings_module.startup({})
 
     assert calls == []
+
+
+def test_poll_delay_is_tuned_down_from_arqs_default():
+    # ARQ's own default (0.5s) polls Redis for new jobs continuously for the
+    # entire lifetime of this in-process worker (see Settings.
+    # run_worker_in_process), independent of real traffic -- live-confirmed
+    # this alone is enough to exhaust a real Redis command quota. Must stay
+    # meaningfully larger than the library default; the exact value can
+    # change, but regressing back toward 0.5s would reintroduce the quota
+    # burn this was tuned to fix.
+    assert worker_settings_module.WorkerSettings.poll_delay >= 10
