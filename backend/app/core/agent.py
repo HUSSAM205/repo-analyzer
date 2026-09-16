@@ -57,7 +57,8 @@ SYSTEM_PROMPT = (
     "no tool -- answer from knowledge. Tools are only for THIS repo's actual files/structure/behavior.\n\n"
     "For a specific thing (testing, deps, config, CI), guess the conventional file directly "
     "(pytest.ini/conftest.py/pyproject.toml, package.json/requirements.txt, README.md) instead of "
-    "exploring broadly.\n\n"
+    "exploring broadly. For a topic likely to live in a conventionally-named place (auth, middleware, "
+    "routing), guess that directly too -- don't list_directory multiple subdirectories hunting for it.\n\n"
     "Cite code as `path/to/file.py:12-18` (search_code result) or `path/to/file.py` (read_file). "
     "Say so if you still lack enough info -- don't speculate.\n\n"
     "Check history first -- reuse a prior tool result, never repeat an identical call. Very few tool "
@@ -86,7 +87,8 @@ SYSTEM_PROMPT_NO_SEARCH = (
     "no tool -- answer from knowledge. Tools are only for THIS repo's actual files/structure/behavior.\n\n"
     "For a specific thing (testing, deps, config, CI), guess the conventional file directly "
     "(pytest.ini/conftest.py/pyproject.toml, package.json/requirements.txt, README.md) instead of "
-    "exploring broadly.\n\n"
+    "exploring broadly. For a topic likely to live in a conventionally-named place (auth, middleware, "
+    "routing), guess that directly too -- don't list_directory multiple subdirectories hunting for it.\n\n"
     "Cite code as `path/to/file.py` after reading it. Say so if you still lack enough info -- don't "
     "speculate.\n\n"
     "Check history first -- reuse a prior tool result, never repeat an identical call. Very few tool "
@@ -124,10 +126,15 @@ SYSTEM_PROMPT_NO_TOOLS = (
 # message with zero calls left to try again. 3 gives one recovery call for
 # exactly that "first guess was the wrong file" case while staying well
 # short of the old 5/108s-worst-case-Groq-retry-era latency this was
-# tightened away from. The give-up message below still fires cleanly if 3
-# is too tight for a given question -- it degrades to "ask a narrower
-# question" rather than hanging, and a follow-up question gets a fresh
-# 3-call budget of its own.
+# tightened away from. Deliberately NOT raised again since: hitting this
+# cap now triggers one extra tools-disabled LLM call to synthesize a real
+# answer from whatever was gathered (see assistant_node below) rather than
+# a bare give-up message -- exactly the same tradeoff this comment already
+# describes (raising this multiplies the SAME quota-exhaustion risk that
+# capped it at 3 in the first place, live-reconfirmed as a real, current
+# constraint), so the synthesis call is the fix for "budget exhausted
+# without a good answer," not a bigger budget. A follow-up question still
+# gets a fresh 3-call budget of its own either way.
 MAX_TOOL_ITERATIONS = 3
 
 # Hard ceiling on a single tool call (list_directory/read_file/search_code).
@@ -148,34 +155,50 @@ _NOTHING_GATHERED_MESSAGE = (
     "number of search steps. Could you narrow your question?"
 )
 
+# Used only for the one extra LLM call assistant_node makes when the
+# iteration cap is hit with real tool results already gathered (see below)
+# -- tools=[] on that call, so this prompt describes none and can't trigger
+# the same "model called a tool with none registered" failure
+# SYSTEM_PROMPT_NO_TOOLS's docstring documents for the chitchat case.
+SYSTEM_PROMPT_SYNTHESIZE = (
+    "You've used all the tool calls available for this turn. Using ONLY the research results already "
+    "gathered above in this conversation, write ONE complete, well-organized answer to the user's "
+    "question now -- don't mention steps, limits, or tools, just answer directly. Cite files as "
+    "`path/to/file.py` where you reference them. If the gathered results genuinely don't cover the "
+    "question, say so plainly and suggest what a narrower follow-up could target -- don't invent an "
+    "answer beyond what's actually been found."
+)
+
 
 def _synthesize_from_gathered_data(messages: list[Message]) -> str:
-    """Best-effort, zero-token synthesis of whatever tool results were
-    already gathered before MAX_TOOL_ITERATIONS was hit -- used by
-    assistant_node instead of a bare apology.
+    """Deterministic, zero-token concatenation of whatever tool results were
+    already gathered before MAX_TOOL_ITERATIONS was hit.
 
-    A multi-step question that exhausts the iteration budget usually still
-    has real, relevant tool output sitting in `messages` (search_code hits,
-    file contents, directory listings) -- the model just never got a final
-    turn to synthesize an answer *from* that data. Handing that data back
-    directly, with no further LLM call, costs nothing extra in tokens or
-    latency and is strictly more useful than a bare apology: the citations
-    (file paths/line ranges already embedded in each tool result's own
-    "### path:start-end" headers -- see agent_tools.py) let the user verify
-    or follow up themselves even if the assembled text isn't as polished as
-    a real model-written answer would have been.
+    This is the SAFETY NET, not the primary path: assistant_node's iteration-
+    cap branch first tries one extra, tools-disabled LLM call (see
+    SYSTEM_PROMPT_SYNTHESIZE) to turn this same gathered data into a real,
+    coherent answer -- a raw concatenation of tool results read like an
+    unhelpful data dump to a real user (live-confirmed complaint: a
+    "Explain auth/data flow" turn that spent its whole budget on
+    list_directory across several subdirectories handed back multiple
+    directory listings verbatim instead of an explanation). This function
+    only fires if that extra call itself fails or comes back empty -- it
+    must never be worse than the old always-deterministic behavior it
+    replaces as the primary path, so it's kept exactly as before other than
+    dropping the literal "ran out of search steps" framing.
 
-    Falls back to a plain apology only when nothing was ever gathered (see
-    _NOTHING_GATHERED_MESSAGE) -- that's no worse than the old behavior for
-    the case this can't improve on.
+    Falls back further to a plain apology only when nothing was ever
+    gathered at all (see _NOTHING_GATHERED_MESSAGE) -- callers check for
+    that case before ever reaching here (an empty `messages` list of tool
+    results has nothing for a synthesis call to work from either).
     """
     tool_messages = [m for m in messages if m.role == "tool" and m.content.strip()]
     if not tool_messages:
         return _NOTHING_GATHERED_MESSAGE
 
     parts = [
-        "I ran out of search steps before I could fully answer, but here's what I found while "
-        "researching this:"
+        "I gathered some research but couldn't fully synthesize it into a single answer -- here's what "
+        "was found:"
     ]
     parts.extend(m.content.strip() for m in tool_messages)
     parts.append(
@@ -205,7 +228,41 @@ def _build_graph(llm_client: LLMClient, tools: list[ToolSpec], tool_functions: d
 
     async def assistant_node(state: AgentState, writer: StreamWriter) -> dict:
         if state["iterations"] >= MAX_TOOL_ITERATIONS:
-            message = Message(role="assistant", content=_synthesize_from_gathered_data(state["messages"]))
+            gathered = [m for m in state["messages"] if m.role == "tool" and m.content.strip()]
+            if not gathered:
+                message = Message(role="assistant", content=_NOTHING_GATHERED_MESSAGE)
+                writer(LLMEvent(type="message_done", message=message))
+                return {"messages": [*state["messages"], message], "done": True}
+
+            # One extra, tools-disabled LLM call that turns the tool results
+            # already gathered into a real, coherent answer, instead of
+            # handing them back as a concatenated dump. tools=[] makes a
+            # further tool call structurally impossible, so this can't
+            # recurse past the cap it resolves. Streams its own "token"
+            # events live (same real-time UX as any other answer) but this
+            # node still emits exactly one final "message_done" of its own
+            # below -- never the inner call's directly -- so the fallback
+            # path can substitute a different message without ever
+            # double-emitting "done" to the client.
+            synth_final: Message | None = None
+            synth_errored = False
+            async for event in llm_client.stream_chat(
+                state["messages"], tools=[], system_prompt=SYSTEM_PROMPT_SYNTHESIZE
+            ):
+                if event.type == "token":
+                    writer(event)
+                elif event.type == "message_done":
+                    synth_final = event.message
+                elif event.type == "error":
+                    synth_errored = True
+
+            if not synth_errored and synth_final is not None and synth_final.content.strip():
+                message = synth_final
+            else:
+                # Safety net: the synthesis call itself failed or came back
+                # empty (both providers exhausted, etc) -- never worse than
+                # the old always-deterministic behavior it replaces.
+                message = Message(role="assistant", content=_synthesize_from_gathered_data(state["messages"]))
             writer(LLMEvent(type="message_done", message=message))
             return {"messages": [*state["messages"], message], "done": True}
 

@@ -357,11 +357,13 @@ async def test_run_agent_gives_up_gracefully_after_max_iterations():
 
 
 @pytest.mark.asyncio
-async def test_run_agent_synthesizes_from_gathered_tool_results_after_max_iterations():
+async def test_run_agent_falls_back_to_deterministic_synthesis_when_the_llm_synthesis_call_also_fails():
     # The give-up path must not be a bare apology when real tool output was
-    # actually gathered along the way -- it should hand that data back
-    # directly (see agent.py's _synthesize_from_gathered_data) rather than
-    # discarding it and telling the user to ask again.
+    # actually gathered along the way. This scripts the extra synthesis call
+    # (see agent.py's assistant_node) to fail the only way FakeLLMClient can
+    # -- coming back with more tool_calls instead of real text, which
+    # structurally can't be used as an answer -- so it exercises the
+    # deterministic _synthesize_from_gathered_data safety net specifically.
     async def real_search(args: dict) -> str:
         return f"### app/auth.py:10-20 (login)\n```\ndef login(): ...\n```"
 
@@ -375,11 +377,35 @@ async def test_run_agent_synthesizes_from_gathered_tool_results_after_max_iterat
 
     final = events[-1]
     assert final.type == "message_done"
-    assert "ran out of search steps" in final.message.content
     assert "app/auth.py:10-20" in final.message.content
     assert "def login()" in final.message.content
     # Must not be the old bare-apology text -- real gathered data was found.
     assert "Could you narrow your question?" not in final.message.content
+
+
+@pytest.mark.asyncio
+async def test_run_agent_uses_a_real_llm_synthesis_when_the_cap_is_hit_with_gathered_data():
+    # The happy path this turn's fix adds: when the extra, tools-disabled
+    # synthesis call DOES come back with real text, that text -- not the
+    # raw concatenated tool-result dump -- must be the final answer.
+    async def real_search(args: dict) -> str:
+        return f"### app/auth.py:10-20 (login)\n```\ndef login(): ...\n```"
+
+    turns = [ScriptedTurn(tool_calls=[ToolCall(id=f"call_{i}", name="search_code", arguments={"query": "auth"})]) for i in range(3)]
+    turns.append(ScriptedTurn(text="Auth is handled by the login() function in app/auth.py."))
+    client = FakeLLMClient(turns=turns)
+
+    events = [
+        event
+        async for event in run_agent(client, _SEARCH_TOOLS, {"search_code": real_search}, [Message(role="user", content="how does auth work")])
+    ]
+
+    final = events[-1]
+    assert final.type == "message_done"
+    assert final.message.content == "Auth is handled by the login() function in app/auth.py."
+    # The raw tool-dump framing must not leak into a successful synthesis.
+    assert "I gathered some research" not in final.message.content
+    assert any(e.type == "token" for e in events)  # streamed live, not silently assembled
 
 
 @pytest.mark.asyncio
