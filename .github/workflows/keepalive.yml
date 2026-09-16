@@ -24,4 +24,4 @@ jobs:
       - name: Ping backend keepalive endpoint
         run: |
           curl -sS -m 10 -o /dev/null -w "keepalive: HTTP %{http_code} in %{time_total}s\n" \
-            https://repo-analyzer.onrender.com/api/v1/keepalive
+            https://repo-analyzer-1vmc.onrender.com/api/v1/keepalive

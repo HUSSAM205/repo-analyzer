@@ -243,7 +243,7 @@ worth a read before you commit to this path for something beyond a demo.
   directory to `frontend/`. Vercel auto-detects Next.js; no build command
   changes needed.
 - Set one env var: `BACKEND_URL` = your Render service's public URL (e.g.
-  `https://repo-analyzer.onrender.com`, no trailing slash). This is a
+  `https://repo-analyzer-1vmc.onrender.com`, no trailing slash). This is a
   **server-only** var (deliberately not `NEXT_PUBLIC_*`) — every backend
   call is proxied through this Next.js app's own `app/api/**/route.ts`
   handlers (see `frontend/lib/backend.ts`), so the browser never talks to
