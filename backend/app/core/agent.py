@@ -175,6 +175,50 @@ SYSTEM_PROMPT_SYNTHESIZE = (
 )
 
 
+def _build_synthesis_messages(messages: list[Message]) -> list[Message]:
+    """Strip all tool-call wire structure out of the conversation before the
+    tools-disabled synthesis call.
+
+    Live-confirmed against the real Groq API (2026-09-16): omitting `tools`
+    from the request (see OpenAIClient._get_stream) and rewording
+    SYSTEM_PROMPT_SYNTHESIZE to drop tool-shaped language (see that prompt's
+    own comment) both reduce but do NOT eliminate
+    "APIError: Tool choice is none, but model called a tool" -- a history
+    containing real assistant messages with tool_calls (exactly what this
+    turn's own earlier iterations produced) is enough on its own to make the
+    model attempt another tool call regardless of what the request offers or
+    the system prompt says, and Groq hard-rejects that attempt. The only
+    fix that held up under repeated live testing is removing the tool-call
+    *shape* from the wire payload entirely: no assistant message here still
+    carries tool_calls, and no message has role="tool", so there is nothing
+    in the request that looks like an in-progress tool-calling turn for the
+    model to continue. The gathered tool results aren't lost -- they're
+    folded into one plain-text user message instead.
+
+    Only ever needs to touch tool_calls/role="tool" messages added live
+    during *this* turn's tool loop -- chat.py's _load_history never persists
+    either to the DB, so earlier turns in `messages` are already clean.
+    """
+    cleaned: list[Message] = []
+    research_parts: list[str] = []
+    for m in messages:
+        if m.role == "tool":
+            if m.content.strip():
+                research_parts.append(m.content.strip())
+            continue
+        if m.role == "assistant" and m.tool_calls:
+            continue
+        cleaned.append(m)
+    if research_parts:
+        cleaned.append(
+            Message(
+                role="user",
+                content="Research already gathered from the codebase:\n\n" + "\n\n".join(research_parts),
+            )
+        )
+    return cleaned
+
+
 def _synthesize_from_gathered_data(messages: list[Message]) -> str:
     """Deterministic, zero-token concatenation of whatever tool results were
     already gathered before MAX_TOOL_ITERATIONS was hit.
@@ -241,25 +285,38 @@ def _build_graph(llm_client: LLMClient, tools: list[ToolSpec], tool_functions: d
 
             # One extra, tools-disabled LLM call that turns the tool results
             # already gathered into a real, coherent answer, instead of
-            # handing them back as a concatenated dump. tools=[] makes a
-            # further tool call structurally impossible, so this can't
-            # recurse past the cap it resolves. Streams its own "token"
-            # events live (same real-time UX as any other answer) but this
-            # node still emits exactly one final "message_done" of its own
-            # below -- never the inner call's directly -- so the fallback
-            # path can substitute a different message without ever
-            # double-emitting "done" to the client.
+            # handing them back as a concatenated dump. tools=[] alone does
+            # NOT make a further tool call structurally impossible -- see
+            # _build_synthesis_messages's comment for why the history also
+            # has to be stripped of tool-call shape, live-confirmed
+            # necessary. Streams its own "token" events live (same real-time
+            # UX as any other answer) but this node still emits exactly one
+            # final "message_done" of its own below -- never the inner
+            # call's directly -- so the fallback path can substitute a
+            # different message without ever double-emitting "done" to the
+            # client.
             synth_final: Message | None = None
             synth_errored = False
+            synth_accumulated_text = ""
             async for event in llm_client.stream_chat(
-                state["messages"], tools=[], system_prompt=SYSTEM_PROMPT_SYNTHESIZE
+                _build_synthesis_messages(state["messages"]), tools=[], system_prompt=SYSTEM_PROMPT_SYNTHESIZE
             ):
                 if event.type == "token":
                     writer(event)
+                    synth_accumulated_text += event.token or ""
                 elif event.type == "message_done":
                     synth_final = event.message
                 elif event.type == "error":
                     synth_errored = True
+                elif event.type == "tool_call":
+                    # Defensive: _build_synthesis_messages is meant to make
+                    # this structurally unreachable, but if a provider ever
+                    # emits one anyway, discard it rather than let it fall
+                    # through silently -- use whatever real text already
+                    # streamed instead of losing it to the deterministic
+                    # safety net below.
+                    if synth_accumulated_text.strip():
+                        synth_final = Message(role="assistant", content=synth_accumulated_text)
 
             if not synth_errored and synth_final is not None and synth_final.content.strip():
                 message = synth_final

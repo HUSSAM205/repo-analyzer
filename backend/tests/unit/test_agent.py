@@ -408,6 +408,74 @@ async def test_run_agent_uses_a_real_llm_synthesis_when_the_cap_is_hit_with_gath
     assert any(e.type == "token" for e in events)  # streamed live, not silently assembled
 
 
+def test_build_synthesis_messages_strips_tool_call_wire_structure():
+    # Live-confirmed against the real Groq API: a history containing
+    # assistant messages with tool_calls, or messages with role="tool",
+    # still makes the model attempt another tool call during the
+    # tools-disabled synthesis call even with tools=[] and a tool-language-
+    # free system prompt -- Groq then hard-rejects that attempt. This must
+    # produce a message list with zero tool_calls and zero role="tool"
+    # entries, with the gathered tool output folded into a plain-text user
+    # message instead, so nothing in the request looks tool-call-shaped.
+    messages = [
+        Message(role="user", content="how does auth work"),
+        Message(
+            role="assistant",
+            content="Let me search.",
+            tool_calls=[ToolCall(id="call_1", name="search_code", arguments={"query": "auth"})],
+        ),
+        Message(role="tool", content="app/auth.py: def login(): ...", tool_call_id="call_1"),
+        Message(
+            role="assistant",
+            content="Let me check one more file.",
+            tool_calls=[ToolCall(id="call_2", name="read_file", arguments={"path": "app/auth.py"})],
+        ),
+        Message(role="tool", content="class Auth: ...", tool_call_id="call_2"),
+    ]
+
+    cleaned = agent_module._build_synthesis_messages(messages)
+
+    assert all(m.role != "tool" for m in cleaned)
+    assert all(not m.tool_calls for m in cleaned)
+    assert cleaned[0] == Message(role="user", content="how does auth work")
+    assert "app/auth.py: def login(): ..." in cleaned[-1].content
+    assert "class Auth: ..." in cleaned[-1].content
+
+
+def test_build_synthesis_messages_is_a_no_op_when_there_is_nothing_to_strip():
+    messages = [
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="hello"),
+    ]
+
+    assert agent_module._build_synthesis_messages(messages) == messages
+
+
+@pytest.mark.asyncio
+async def test_run_agent_uses_partial_text_when_synthesis_call_unexpectedly_emits_a_tool_call():
+    # Defensive path in assistant_node: _build_synthesis_messages is meant
+    # to make a tool_call structurally unreachable during synthesis, but if
+    # a provider emits one anyway, whatever text already streamed before it
+    # must still be used as the answer instead of silently discarding it
+    # for the deterministic dump.
+    async def real_search(args: dict) -> str:
+        return "### app/auth.py:10-20 (login)\n```\ndef login(): ...\n```"
+
+    turns = [ScriptedTurn(tool_calls=[ToolCall(id=f"call_{i}", name="search_code", arguments={"query": "auth"})]) for i in range(3)]
+    turns.append(ScriptedTurn(text="Auth is handled by login().", tool_calls=[ToolCall(id="call_stray", name="search_code", arguments={})]))
+    client = FakeLLMClient(turns=turns)
+
+    events = [
+        event
+        async for event in run_agent(client, _SEARCH_TOOLS, {"search_code": real_search}, [Message(role="user", content="how does auth work")])
+    ]
+
+    final = events[-1]
+    assert final.type == "message_done"
+    assert final.message.content.strip() == "Auth is handled by login()."
+    assert "I gathered some research" not in final.message.content
+
+
 @pytest.mark.asyncio
 async def test_run_agent_falls_back_to_apology_when_nothing_was_gathered():
     # If every tool call this turn came back empty (or the model never
