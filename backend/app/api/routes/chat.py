@@ -225,6 +225,55 @@ async def _maybe_extend_summary(conversation_id: UUID) -> None:
         logger.exception("Background conversation-summary update failed for conversation_id=%s", conversation_id)
 
 
+# ~150 tokens at this codebase's ~4-chars/token heuristic (see
+# token_budget.py) -- small relative to MAX_HISTORY_TOKENS, deliberately:
+# this is a primer, not a substitute for the agent's own tools.
+_DOMAIN_BRIEFING_MAX_CHARS = 600
+
+
+def _build_domain_context_messages(repo: Repo | None) -> list[AgentMessage]:
+    """A short, zero-marginal-LLM-cost primer on what this repo IS, built
+    from the domain briefing already computed once at analysis time (see
+    app/core/domain_briefing.py) -- injected ahead of the agent's own tool
+    loop so a broad "what does this project do"/"give me a brief" question
+    doesn't have to spend its small MAX_TOOL_ITERATIONS budget (see
+    agent.py) rediscovering things analysis already answered for free. Live-
+    confirmed this class of question (a large, unfamiliar repo, a broad
+    "give me a brief" ask) can exhaust that budget on list_directory/
+    read_file exploration alone, landing on the give-up synthesis instead
+    of a real answer -- this doesn't raise the iteration cap (that value has
+    its own real tuning history balancing against latency and provider-
+    quota cost, see agent.py's comment on it) but gives the agent enough to
+    often finish in fewer calls, or none, for exactly this question shape.
+
+    Same synthetic user/assistant-exchange pattern _load_history already
+    uses for conversation.summary, for the same reason: providers like
+    Anthropic require the message list to start with a "user" message, and
+    framing this as a Q&A keeps that invariant regardless of what else gets
+    prepended in front of it.
+    """
+    if repo is None or not repo.domain_briefing:
+        return []
+    briefing = repo.domain_briefing
+    primary_field = (briefing.get("primary_field") or "").strip()
+    target_audience = (briefing.get("target_audience") or "").strip()
+    overview = (briefing.get("architecture_overview") or "").strip()[:_DOMAIN_BRIEFING_MAX_CHARS]
+    if not (primary_field or target_audience or overview):
+        return []
+
+    parts = []
+    if primary_field:
+        parts.append(f"Domain: {primary_field}.")
+    if target_audience:
+        parts.append(f"Built for: {target_audience}.")
+    if overview:
+        parts.append(overview)
+    return [
+        AgentMessage(role="user", content="(For context, what kind of project is this repository?)"),
+        AgentMessage(role="assistant", content=" ".join(parts)),
+    ]
+
+
 _TITLE_MAX_LENGTH = 60
 
 
@@ -362,6 +411,7 @@ async def send_message(
     repo_id = conversation.repo_id
     conversation_id_value = conversation.id
 
+    repo = await db.get(Repo, repo_id)
     history = await _load_history(db, conversation)
 
     # A conversation picker full of indistinguishable "New conversation"
@@ -410,7 +460,11 @@ async def send_message(
                 yield chunk
             return
 
-        conversation_messages = [*history, AgentMessage(role="user", content=payload.content)]
+        conversation_messages = [
+            *_build_domain_context_messages(repo),
+            *history,
+            AgentMessage(role="user", content=payload.content),
+        ]
 
         async def search_fn(args: dict) -> str:
             async with async_session_maker() as search_db:
