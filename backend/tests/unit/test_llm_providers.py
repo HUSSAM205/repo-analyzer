@@ -520,6 +520,66 @@ async def test_openai_client_strips_think_tags_split_across_stream_chunks():
 
 
 @pytest.mark.asyncio
+async def test_openai_client_omits_tools_kwarg_entirely_when_there_are_none():
+    # Live-confirmed: sending an explicit empty tools=[] (rather than
+    # omitting the key) can get Groq to hard-reject the request with
+    # "APIError: Tool choice is none, but model called a tool" -- most
+    # likely when the message history already contains real prior
+    # assistant tool_calls (agent.py's synthesis call after the iteration
+    # cap is exactly this case). Omitting "tools" entirely when there are
+    # none removes that failure mode instead of relying on the model never
+    # producing a tool-call-shaped response.
+    client = OpenAIClient(api_key="test-key", model="test-model")
+    captured_kwargs: dict = {}
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk("hi")
+
+    async def fake_create(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_stream()
+
+    client._client.chat.completions.create = fake_create
+
+    async for _ in client.stream_chat(messages=[Message(role="user", content="hi")], tools=[], system_prompt="sys"):
+        pass
+
+    assert "tools" not in captured_kwargs
+
+
+@pytest.mark.asyncio
+async def test_openai_client_still_sends_tools_kwarg_when_tools_are_provided():
+    from app.core.llm import ToolSpec
+
+    client = OpenAIClient(api_key="test-key", model="test-model")
+    captured_kwargs: dict = {}
+
+    class FakeChunk:
+        def __init__(self, content):
+            self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))]
+
+    async def fake_stream():
+        yield FakeChunk("hi")
+
+    async def fake_create(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_stream()
+
+    client._client.chat.completions.create = fake_create
+    tool = ToolSpec(name="search_code", description="search", parameters={})
+
+    async for _ in client.stream_chat(messages=[Message(role="user", content="hi")], tools=[tool], system_prompt="sys"):
+        pass
+
+    assert "tools" in captured_kwargs
+    assert captured_kwargs["tools"][0]["function"]["name"] == "search_code"
+
+
+@pytest.mark.asyncio
 async def test_groq_client_retries_stream_connect_and_succeeds(monkeypatch):
     import app.core.llm_providers as llm_providers_module
     from app.core.llm_providers import GroqClient

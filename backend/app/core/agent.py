@@ -157,16 +157,21 @@ _NOTHING_GATHERED_MESSAGE = (
 
 # Used only for the one extra LLM call assistant_node makes when the
 # iteration cap is hit with real tool results already gathered (see below)
-# -- tools=[] on that call, so this prompt describes none and can't trigger
-# the same "model called a tool with none registered" failure
-# SYSTEM_PROMPT_NO_TOOLS's docstring documents for the chitchat case.
+# -- tools=[] on that call. Deliberately contains NO tool-shaped language at
+# all (no "tool calls", "tools", "steps"), same reasoning as
+# SYSTEM_PROMPT_NO_TOOLS's docstring: an earlier version of this prompt DID
+# say "You've used all the tool calls available..." and live-confirmed hit
+# the exact same Groq failure that prompt's docstring already documented
+# ("APIError: Tool choice is none, but model called a tool") -- worse here,
+# since (unlike chitchat's always-clean history) this call's own message
+# history is full of real prior assistant tool_calls from this same turn's
+# earlier iterations, giving the model every reason to keep going unless
+# the prompt gives it zero tool-shaped language to key off at all.
 SYSTEM_PROMPT_SYNTHESIZE = (
-    "You've used all the tool calls available for this turn. Using ONLY the research results already "
-    "gathered above in this conversation, write ONE complete, well-organized answer to the user's "
-    "question now -- don't mention steps, limits, or tools, just answer directly. Cite files as "
-    "`path/to/file.py` where you reference them. If the gathered results genuinely don't cover the "
-    "question, say so plainly and suggest what a narrower follow-up could target -- don't invent an "
-    "answer beyond what's actually been found."
+    "Using ONLY the research already gathered above in this conversation, write ONE complete, "
+    "well-organized answer to the user's original question now. Cite files as `path/to/file.py` where "
+    "you reference them. If the gathered research genuinely doesn't cover the question, say so plainly "
+    "and suggest a narrower follow-up -- don't invent an answer beyond what's actually there."
 )
 
 

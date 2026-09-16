@@ -30,8 +30,24 @@ _PROVIDER_ERROR_MESSAGE = "The AI provider is currently unavailable. Please try 
 # genuinely stuck than about to succeed slowly, and every second spent
 # waiting on a probably-dead connection is a second not spent trying the
 # tier that might actually answer. GroqClient uses its own, separate
-# _GROQ_CONNECT_TIMEOUT_SECONDS below rather than this one.
+# _GROQ_CONNECT_TIMEOUT_SECONDS below rather than this one. GeminiClient
+# uses its own _GEMINI_CLIENT_TIMEOUT_SECONDS instead of this one too (see
+# that constant) -- this value is otherwise shared by Anthropic/OpenAI/
+# Groq/Ollama.
 _CLIENT_TIMEOUT_SECONDS = 8.0
+
+# Live-confirmed against the real Gemini API (google-genai SDK) on
+# 2026-09-16: an HttpOptions.timeout below 10000ms is hard-rejected before
+# the request is even attempted -- "400 INVALID_ARGUMENT: Manually set
+# deadline 8s is too short. Minimum allowed deadline is 10s." This means
+# GeminiClient using the shared 8s _CLIENT_TIMEOUT_SECONDS never actually
+# reached the model at all: every call (both LLM_PROVIDER=gemini directly,
+# and every DualProviderClient fallback onto Gemini after a Groq failure)
+# failed outright on this client-side deadline check. 12s clears the
+# confirmed 10s floor with a safety margin, while staying far short of the
+# old 60s default this whole module moved away from for the same fail-fast
+# reasons _CLIENT_TIMEOUT_SECONDS's own comment documents.
+_GEMINI_CLIENT_TIMEOUT_SECONDS = 12.0
 
 # OpenAI-compatible chat-completions calls (OpenAIClient/GroqClient/
 # OllamaClient) previously left max_tokens unset, so the completion side of
@@ -257,13 +273,26 @@ class OpenAIClient:
     # returned stream, some tokens may already be on their way to the user
     # -- retrying at that point would risk yielding duplicated output.
     async def _get_stream(self, openai_messages: list[dict], openai_tools: list[dict]):
-        return await self._client.chat.completions.create(
-            model=self._model,
-            messages=openai_messages,
-            tools=openai_tools,
-            stream=True,
-            max_tokens=_MAX_COMPLETION_TOKENS,
-        )
+        kwargs: dict = {
+            "model": self._model,
+            "messages": openai_messages,
+            "stream": True,
+            "max_tokens": _MAX_COMPLETION_TOKENS,
+        }
+        # Omit "tools" entirely rather than sending an explicit empty list
+        # when there are none (e.g. a chitchat reply, or agent.py's
+        # tools-disabled synthesis call after the iteration cap) --
+        # live-confirmed Groq can otherwise reject the request outright
+        # ("openai.APIError: Tool choice is none, but model called a tool")
+        # if the model's own output still looks tool-call-shaped, which a
+        # conversation history full of real prior tool_calls (exactly
+        # agent.py's synthesis-call case) makes more likely. Omitting the
+        # key removes any tools/tool_choice framing from the request at
+        # all, instead of asking the API to reconcile "zero tools offered"
+        # against a history that already shows tool-calling behavior.
+        if openai_tools:
+            kwargs["tools"] = openai_tools
+        return await self._client.chat.completions.create(**kwargs)
 
     async def stream_chat(
         self, messages: list[Message], tools: list[ToolSpec], system_prompt: str
@@ -560,10 +589,14 @@ def _gemini_response_parts(chunk) -> list:
 class GeminiClient:
     def __init__(self, api_key: str, model: str):
         # HttpOptions.timeout is in milliseconds, unlike the other two SDKs'
-        # second-based timeout kwargs.
+        # second-based timeout kwargs. Uses its own
+        # _GEMINI_CLIENT_TIMEOUT_SECONDS, not the shared _CLIENT_TIMEOUT_SECONDS
+        # -- see that constant's comment for why (the shared 8s value is
+        # below Gemini's own confirmed 10s minimum and made every call fail
+        # outright).
         self._client = genai.Client(
             api_key=api_key,
-            http_options=genai_types.HttpOptions(timeout=int(_CLIENT_TIMEOUT_SECONDS * 1000)),
+            http_options=genai_types.HttpOptions(timeout=int(_GEMINI_CLIENT_TIMEOUT_SECONDS * 1000)),
         )
         self._model = model
         # Cache of ToolCall.id -> thought_signature, and the counter that
